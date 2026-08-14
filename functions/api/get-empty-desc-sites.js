@@ -1,5 +1,6 @@
 // functions/api/get-empty-desc-sites.js
 import { isAdminAuthenticated, errorResponse, jsonResponse } from '../_middleware';
+import { loadData } from '../lib/github-data-store';
 
 export async function onRequestGet(context) {
   const { request, env } = context;
@@ -10,10 +11,11 @@ export async function onRequestGet(context) {
   }
 
   try {
-    // 2. 查询数据库中描述为空或NULL的记录
-    const { results } = await env.NAV_DB.prepare(
-      "SELECT id, name, url , logo FROM sites WHERE desc IS NULL OR desc = ''"
-    ).all();
+    // 2. 查询描述为空或NULL的记录
+    const data = await loadData(env);
+    const results = (data.sites || [])
+      .filter(s => !s.desc || String(s.desc).trim() === '')
+      .map(s => ({ id: s.id, name: s.name, url: s.url, logo: s.logo }));
 
     // 3. 返回结果
     return jsonResponse({

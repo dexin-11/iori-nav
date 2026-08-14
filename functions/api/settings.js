@@ -3,6 +3,7 @@ import { isAdminAuthenticated, errorResponse, jsonResponse, markHomeCacheDirty }
 import { getSettingsKeys, normalizeSettingValueForStorage } from '../lib/settings-parser';
 import { sanitizeUrl } from '../lib/utils';
 import { validateOpaqueText } from '../lib/validators';
+import { readFromGithub, saveData, getSettingMap, upsertSettings } from '../lib/github-data-store';
 
 const LAYOUT_SETTING_KEYS = new Set(getSettingsKeys());
 const AI_SETTING_KEYS = new Set(['provider', 'apiKey', 'baseUrl', 'model']);
@@ -118,48 +119,33 @@ export async function onRequestGet(context) {
   }
 
   try {
-    // Try to get all settings
-    const { results } = await env.NAV_DB.prepare('SELECT key, value FROM settings').all();
+    const { data } = await readFromGithub(env);
+    const map = getSettingMap(data);
 
     const settings = {};
-    if (results) {
-      results.forEach(row => {
-        // 忽略后端计算字段或调试字段，防止数据库脏数据覆盖
-        if (IGNORED_SETTING_KEYS.has(row.key)) {
-          return;
-        }
+    for (const [key, value] of Object.entries(map)) {
+      // 忽略后端计算字段或调试字段，防止脏数据覆盖
+      if (IGNORED_SETTING_KEYS.has(key)) {
+        continue;
+      }
 
-        if (!LAYOUT_SETTING_KEYS.has(row.key) && !AI_SETTING_KEYS.has(row.key) && !WEBDAV_SETTING_KEYS.has(row.key)) {
-          return;
-        }
+      if (!LAYOUT_SETTING_KEYS.has(key) && !AI_SETTING_KEYS.has(key) && !WEBDAV_SETTING_KEYS.has(key)) {
+        continue;
+      }
 
-        // 敏感字段不返回给前端
-        if (row.key === 'apiKey' || row.key === 'webdav_password') {
-          if (row.value && row.value.length > 0) {
-            settings[row.key === 'apiKey' ? 'has_api_key' : 'has_webdav_password'] = true;
-          } else {
-            settings[row.key === 'apiKey' ? 'has_api_key' : 'has_webdav_password'] = false;
-          }
-        } else {
-          settings[row.key] = row.value;
-        }
-      });
+      // 敏感字段不返回给前端
+      if (key === 'apiKey' || key === 'webdav_password') {
+        settings[key === 'apiKey' ? 'has_api_key' : 'has_webdav_password'] = Boolean(value && value.length > 0);
+      } else {
+        settings[key] = value;
+      }
     }
-
 
     return jsonResponse({
       code: 200,
       data: settings
     });
   } catch (e) {
-    // If table doesn't exist, return empty settings or try to create it?
-    // For GET, just returning empty is fine if it doesn't exist, but we might want to initialize it.
-    if (e.message && (e.message.includes('no such table') || e.message.includes('settings'))) {
-      return jsonResponse({
-        code: 200,
-        data: {} // No settings yet
-      });
-    }
     return errorResponse(`Failed to fetch settings: ${e.message}`, 500);
   }
 }
@@ -179,18 +165,7 @@ export async function onRequestPost(context) {
       return errorResponse('Invalid settings data', 400);
     }
 
-    // Ensure table exists
-    try {
-      await env.NAV_DB.prepare(`
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-        `).run();
-    } catch (e) {
-      console.error('Failed to ensure settings table:', e);
-      // Continue, maybe it exists or error will happen on upsert
-    }
+    const { data, sha } = await readFromGithub(env);
 
     const normalizedEntries = [];
     for (const [key, value] of Object.entries(settings)) {
@@ -231,22 +206,12 @@ export async function onRequestPost(context) {
       normalizedEntries.push([key, normalized.value]);
     }
 
-    let changedEntries = normalizedEntries;
-    if (normalizedEntries.length > 0) {
-      const keys = normalizedEntries.map(([key]) => key);
-      const placeholders = keys.map(() => '?').join(',');
-      const { results = [] } = await env.NAV_DB
-        .prepare(`SELECT key, value FROM settings WHERE key IN (${placeholders})`)
-        .bind(...keys)
-        .all();
-      const existingSettings = new Map(results.map(row => [row.key, row.value]));
-
-      changedEntries = normalizedEntries.filter(([key, value]) => existingSettings.get(key) !== value);
-    }
+    const existingMap = getSettingMap(data);
+    const changedEntries = normalizedEntries.filter(([key, value]) => existingMap[key] !== value);
 
     if (changedEntries.length > 0) {
-      const stmt = env.NAV_DB.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
-      await env.NAV_DB.batch(changedEntries.map(([key, value]) => stmt.bind(key, value)));
+      upsertSettings(data, changedEntries);
+      await saveData(env, data, sha);
     }
 
     // 保存成功后刷新设置缓存和首页缓存，避免旧缓存状态阻止设置生效。

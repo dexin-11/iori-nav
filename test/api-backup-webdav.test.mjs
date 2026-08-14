@@ -3,53 +3,23 @@ import assert from 'node:assert/strict';
 
 import { onRequestPost, onRequestGet, onRequestDelete } from '../functions/api/backup/webdav.js';
 import { INPUT_LIMITS, IMPORT_BODY_MAX_BYTES } from '../functions/lib/validators.js';
+import { createKv, seedData, emptyData } from './helpers/github-data-store.mjs';
 
-function createKv(initialEntries = {}) {
-  const store = new Map(Object.entries(initialEntries));
-  return {
-    store,
-    async get(key) {
-      return store.get(key) ?? null;
-    },
-    async put(key, value) {
-      store.set(key, value);
-    },
-    async delete(key) {
-      store.delete(key);
-    },
-  };
+function settingsToRows(settings) {
+  return Object.entries(settings).map(([key, value]) => ({ key, value }));
 }
 
-function createDb({ settings = {}, sites = [], categories = [] } = {}) {
-  return {
-    prepare(sql) {
-      const makeStatement = (params = []) => ({
-        async all() {
-          if (sql.includes('SELECT key, value FROM settings WHERE key IN')) {
-            return {
-              results: params
-                .filter(key => settings[key] !== undefined)
-                .map(key => ({ key, value: settings[key] })),
-            };
-          }
-          if (sql.includes('FROM sites')) {
-            return { results: sites };
-          }
-          if (sql.includes('FROM category')) {
-            return { results: categories };
-          }
-          return { results: [] };
-        },
-      });
-      return {
-        bind(...params) {
-          return makeStatement(params);
-        },
-        // fetchBookmarkExport 不带参数，直接 prepare(...).all()
-        all: makeStatement().all,
-      };
-    },
-  };
+// 未配置 GITHUB_REPO 时，数据存储以 KV 缓存 (github_data_cache) 为唯一数据源。
+// settings 以 [{ key, value }] 数组形式存进 data.settings。
+function buildEnv({ settings = {}, sites = [], categories = [] } = {}) {
+  const kv = createKv({ session_token: '1' });
+  seedData(kv, {
+    ...emptyData(),
+    settings: settingsToRows(settings),
+    sites,
+    categories,
+  });
+  return { env: { NAV_AUTH: kv }, kv };
 }
 
 function buildRequest() {
@@ -124,16 +94,16 @@ test('POST /api/backup/webdav rejects unauthenticated requests', async () => {
   const request = new Request('https://example.com/api/backup/webdav', { method: 'POST' });
   const response = await onRequestPost({
     request,
-    env: { NAV_AUTH: createKv(), NAV_DB: createDb() },
+    env: { NAV_AUTH: createKv() },
   });
   assert.equal(response.status, 401);
 });
 
 test('POST /api/backup/webdav returns 400 when WebDAV is not configured', async () => {
-  const kv = createKv({ session_token: '1' });
+  const { env } = buildEnv();
   const response = await onRequestPost({
     request: buildRequest(),
-    env: { NAV_AUTH: kv, NAV_DB: createDb() },
+    env,
   });
   const body = await response.json();
   assert.equal(response.status, 400);
@@ -143,13 +113,12 @@ test('POST /api/backup/webdav returns 400 when WebDAV is not configured', async 
 // 只缺密码时不能提「地址」：多标签页里另一个标签清了密码，本标签地址还填着，
 // 合成一条提示会让用户对着已填好的地址排查
 test('POST /api/backup/webdav names only the missing field', async () => {
-  const kv = createKv({ session_token: '1' });
+  const { env } = buildEnv({
+    settings: { webdav_url: 'https://dav.example.com/', webdav_username: 'user' },
+  });
   const response = await onRequestPost({
     request: buildRequest(),
-    env: {
-      NAV_AUTH: kv,
-      NAV_DB: createDb({ settings: { webdav_url: 'https://dav.example.com/', webdav_username: 'user' } }),
-    },
+    env,
   });
   const body = await response.json();
   assert.equal(response.status, 400);
@@ -158,8 +127,7 @@ test('POST /api/backup/webdav names only the missing field', async () => {
 });
 
 test('POST /api/backup/webdav uploads full bookmarks including private ones', async () => {
-  const kv = createKv({ session_token: '1' });
-  const db = createDb({
+  const { env } = buildEnv({
     settings: { webdav_url: 'https://dav.example.com/', webdav_username: 'user', webdav_password: 'secret', webdav_dir: 'iori-nav' },
     sites: SAMPLE_DATA.sites,
     categories: SAMPLE_DATA.categories,
@@ -169,7 +137,7 @@ test('POST /api/backup/webdav uploads full bookmarks including private ones', as
 
   const response = await onRequestPost({
     request: buildRequest(),
-    env: { NAV_AUTH: kv, NAV_DB: db },
+    env,
   });
   const body = await response.json();
 
@@ -189,15 +157,14 @@ test('POST /api/backup/webdav uploads full bookmarks including private ones', as
 });
 
 test('POST /api/backup/webdav accepts a restorable category-only backup', async () => {
-  const kv = createKv({ session_token: '1' });
-  const db = createDb({
+  const { env } = buildEnv({
     settings: { webdav_url: 'https://dav.example.com/', webdav_password: 'secret' },
     categories: [{ id: 1, catelog: '空分类', parent_id: 0, is_private: 0 }],
     sites: [],
   });
   const calls = stubFetchOnce(() => jsonResponse(201, {}));
 
-  const response = await onRequestPost({ request: buildRequest(), env: { NAV_AUTH: kv, NAV_DB: db } });
+  const response = await onRequestPost({ request: buildRequest(), env });
   const body = await response.json();
 
   assert.equal(response.status, 200, body.message);
@@ -206,8 +173,7 @@ test('POST /api/backup/webdav accepts a restorable category-only backup', async 
 });
 
 test('POST /api/backup/webdav rejects legacy rows that the importer would skip', async () => {
-  const kv = createKv({ session_token: '1' });
-  const db = createDb({
+  const { env } = buildEnv({
     settings: { webdav_url: 'https://dav.example.com/', webdav_password: 'secret' },
     categories: [{ id: 1, catelog: '默认', parent_id: 0 }],
     sites: [{
@@ -224,7 +190,7 @@ test('POST /api/backup/webdav rejects legacy rows that the importer would skip',
     return jsonResponse(201, {});
   });
 
-  const response = await onRequestPost({ request: buildRequest(), env: { NAV_AUTH: kv, NAV_DB: db } });
+  const response = await onRequestPost({ request: buildRequest(), env });
   const body = await response.json();
 
   assert.equal(response.status, 413);
@@ -233,14 +199,13 @@ test('POST /api/backup/webdav rejects legacy rows that the importer would skip',
 });
 
 test('POST /api/backup/webdav refuses backups that the importer cannot restore', async () => {
-  const kv = createKv({ session_token: '1' });
   const sites = Array.from({ length: INPUT_LIMITS.importSites + 1 }, (_, i) => ({
     id: i + 1,
     name: `站点 ${i + 1}`,
     url: `https://example.com/${i + 1}`,
     catelog_id: 1,
   }));
-  const db = createDb({
+  const { env } = buildEnv({
     settings: { webdav_url: 'https://dav.example.com/', webdav_password: 'secret' },
     sites,
     categories: [{ id: 1, catelog: '默认', parent_id: 0 }],
@@ -251,7 +216,7 @@ test('POST /api/backup/webdav refuses backups that the importer cannot restore',
     return jsonResponse(201, {});
   });
 
-  const response = await onRequestPost({ request: buildRequest(), env: { NAV_AUTH: kv, NAV_DB: db } });
+  const response = await onRequestPost({ request: buildRequest(), env });
   const body = await response.json();
 
   assert.equal(response.status, 413);
@@ -260,8 +225,7 @@ test('POST /api/backup/webdav refuses backups that the importer cannot restore',
 });
 
 test('POST /api/backup/webdav creates missing directory via MKCOL then retries PUT', async () => {
-  const kv = createKv({ session_token: '1' });
-  const db = createDb({
+  const { env } = buildEnv({
     settings: { webdav_url: 'https://dav.example.com/', webdav_username: 'user', webdav_password: 'secret', webdav_dir: 'iori-nav/sub' },
     sites: SAMPLE_DATA.sites,
     categories: SAMPLE_DATA.categories,
@@ -283,7 +247,7 @@ test('POST /api/backup/webdav creates missing directory via MKCOL then retries P
 
   const response = await onRequestPost({
     request: buildRequest(),
-    env: { NAV_AUTH: kv, NAV_DB: db },
+    env,
   });
   const body = await response.json();
 
@@ -296,8 +260,7 @@ test('POST /api/backup/webdav creates missing directory via MKCOL then retries P
 });
 
 test('POST /api/backup/webdav surfaces WebDAV auth errors', async () => {
-  const kv = createKv({ session_token: '1' });
-  const db = createDb({
+  const { env } = buildEnv({
     settings: { webdav_url: 'https://dav.example.com/', webdav_username: 'user', webdav_password: 'wrong' },
     sites: SAMPLE_DATA.sites,
     categories: SAMPLE_DATA.categories,
@@ -307,7 +270,7 @@ test('POST /api/backup/webdav surfaces WebDAV auth errors', async () => {
 
   const response = await onRequestPost({
     request: buildRequest(),
-    env: { NAV_AUTH: kv, NAV_DB: db },
+    env,
   });
   const body = await response.json();
 
@@ -317,8 +280,7 @@ test('POST /api/backup/webdav surfaces WebDAV auth errors', async () => {
 
 test('WebDAV requests never follow redirects with credentials attached', async () => {
   // 每个请求都带 Basic 凭据，跟随 30x 就可能把账号密码发给 Location 指向的主机
-  const kv = createKv({ session_token: '1' });
-  const db = createDb({
+  const { env } = buildEnv({
     settings: { webdav_url: 'https://dav.example.com/', webdav_username: 'user', webdav_password: 'secret' },
     sites: SAMPLE_DATA.sites,
     categories: SAMPLE_DATA.categories,
@@ -331,7 +293,7 @@ test('WebDAV requests never follow redirects with credentials attached', async (
 
   const response = await onRequestPost({
     request: buildRequest(),
-    env: { NAV_AUTH: kv, NAV_DB: db },
+    env,
   });
   const body = await response.json();
 
@@ -345,8 +307,7 @@ test('WebDAV requests never follow redirects with credentials attached', async (
 test('POST /api/backup/webdav reports which directory level MKCOL failed on', async () => {
   // 中间层失败时若只回 false，用户看到的是 PUT 的 409，
   // 会对着「目录不存在」排查，而真实原因是某一层没有写权限
-  const kv = createKv({ session_token: '1' });
-  const db = createDb({
+  const { env } = buildEnv({
     settings: {
       webdav_url: 'https://dav.example.com/',
       webdav_username: 'user',
@@ -373,7 +334,7 @@ test('POST /api/backup/webdav reports which directory level MKCOL failed on', as
 
   const response = await onRequestPost({
     request: buildRequest(),
-    env: { NAV_AUTH: kv, NAV_DB: db },
+    env,
   });
   const body = await response.json();
 
@@ -386,20 +347,19 @@ test('POST /api/backup/webdav reports which directory level MKCOL failed on', as
 test('GET /api/backup/webdav rejects unauthenticated requests', async () => {
   const response = await onRequestGet({
     request: new Request('https://example.com/api/backup/webdav', { method: 'GET' }),
-    env: { NAV_AUTH: createKv(), NAV_DB: createDb() },
+    env: { NAV_AUTH: createKv() },
   });
   assert.equal(response.status, 401);
 });
 
 test('GET /api/backup/webdav lists the 10 most recent backups', async () => {
-  const kv = createKv({ session_token: '1' });
-  const db = createDb({
+  const { env } = buildEnv({
     settings: { webdav_url: 'https://dav.example.com/', webdav_username: 'u', webdav_password: 'p', webdav_dir: 'nav' },
   });
 
   const calls = stubFetchOnce(() => new Response(PROPFIND_XML, { status: 207 }));
 
-  const response = await onRequestGet({ request: buildGetRequest('?limit=10'), env: { NAV_AUTH: kv, NAV_DB: db } });
+  const response = await onRequestGet({ request: buildGetRequest('?limit=10'), env });
   const body = await response.json();
 
   assert.equal(response.status, 200);
@@ -411,8 +371,7 @@ test('GET /api/backup/webdav lists the 10 most recent backups', async () => {
 });
 
 test('GET /api/backup/webdav?filename downloads and returns bookmark payload', async () => {
-  const kv = createKv({ session_token: '1' });
-  const db = createDb({
+  const { env } = buildEnv({
     settings: { webdav_url: 'https://dav.example.com/', webdav_username: 'u', webdav_password: 'p', webdav_dir: 'nav' },
   });
 
@@ -421,7 +380,7 @@ test('GET /api/backup/webdav?filename downloads and returns bookmark payload', a
 
   const response = await onRequestGet({
     request: buildGetRequest('?filename=iori-nav-backup-20260202-080000-000-20260202080000aaaaaaaaaaaaaaaaaa.json'),
-    env: { NAV_AUTH: kv, NAV_DB: db },
+    env,
   });
   const body = await response.json();
 
@@ -433,8 +392,7 @@ test('GET /api/backup/webdav?filename downloads and returns bookmark payload', a
 });
 
 test('GET /api/backup/webdav rejects legacy backups beyond the importer limit', async () => {
-  const kv = createKv({ session_token: '1' });
-  const db = createDb({
+  const { env } = buildEnv({
     settings: { webdav_url: 'https://dav.example.com/', webdav_username: 'u', webdav_password: 'p' },
   });
   const payload = {
@@ -445,7 +403,7 @@ test('GET /api/backup/webdav rejects legacy backups beyond the importer limit', 
 
   const response = await onRequestGet({
     request: buildGetRequest('?filename=iori-nav-backup-20260202-080000-000-20260202080000aaaaaaaaaaaaaaaaaa.json'),
-    env: { NAV_AUTH: kv, NAV_DB: db },
+    env,
   });
   const body = await response.json();
 
@@ -454,8 +412,7 @@ test('GET /api/backup/webdav rejects legacy backups beyond the importer limit', 
 });
 
 test('GET /api/backup/webdav rejects an oversized download before buffering it', async () => {
-  const kv = createKv({ session_token: '1' });
-  const db = createDb({
+  const { env } = buildEnv({
     settings: { webdav_url: 'https://dav.example.com/', webdav_username: 'u', webdav_password: 'p' },
   });
 
@@ -472,7 +429,7 @@ test('GET /api/backup/webdav rejects an oversized download before buffering it',
 
   const response = await onRequestGet({
     request: buildGetRequest('?filename=iori-nav-backup-20260202-080000-000-20260202080000aaaaaaaaaaaaaaaaaa.json'),
-    env: { NAV_AUTH: kv, NAV_DB: db },
+    env,
   });
   const responseBody = await response.json();
 
@@ -489,8 +446,7 @@ test('GET /api/backup/webdav rejects an oversized download before buffering it',
 
 test('GET /api/backup/webdav caps an oversized PROPFIND listing', async () => {
   // 列表响应同样是外部服务器控制的，不能裸 res.text() 全量读进来
-  const kv = createKv({ session_token: '1' });
-  const db = createDb({
+  const { env } = buildEnv({
     settings: { webdav_url: 'https://dav.example.com/', webdav_username: 'u', webdav_password: 'p' },
   });
 
@@ -506,7 +462,7 @@ test('GET /api/backup/webdav caps an oversized PROPFIND listing', async () => {
 
   const response = await onRequestGet({
     request: buildGetRequest('?limit=10'),
-    env: { NAV_AUTH: kv, NAV_DB: db },
+    env,
   });
   const responseBody = await response.json();
 
@@ -519,8 +475,7 @@ test('GET /api/backup/webdav caps an oversized PROPFIND listing', async () => {
 });
 
 test('GET /api/backup/webdav rejects an oversized download declared via Content-Length', async () => {
-  const kv = createKv({ session_token: '1' });
-  const db = createDb({
+  const { env } = buildEnv({
     settings: { webdav_url: 'https://dav.example.com/', webdav_username: 'u', webdav_password: 'p' },
   });
 
@@ -542,7 +497,7 @@ test('GET /api/backup/webdav rejects an oversized download declared via Content-
 
   const response = await onRequestGet({
     request: buildGetRequest('?filename=iori-nav-backup-20260202-080000-000-20260202080000aaaaaaaaaaaaaaaaaa.json'),
-    env: { NAV_AUTH: kv, NAV_DB: db },
+    env,
   });
   const responseBody = await response.json();
 
@@ -552,8 +507,7 @@ test('GET /api/backup/webdav rejects an oversized download declared via Content-
 });
 
 test('GET /api/backup/webdav rejects filenames outside the backup pattern', async () => {
-  const kv = createKv({ session_token: '1' });
-  const db = createDb({
+  const { env } = buildEnv({
     settings: { webdav_url: 'https://dav.example.com/', webdav_username: 'u', webdav_password: 'p' },
   });
 
@@ -562,7 +516,7 @@ test('GET /api/backup/webdav rejects filenames outside the backup pattern', asyn
 
   const response = await onRequestGet({
     request: buildGetRequest('?filename=../../etc/passwd'),
-    env: { NAV_AUTH: kv, NAV_DB: db },
+    env,
   });
 
   assert.equal(response.status, 400);
@@ -570,8 +524,7 @@ test('GET /api/backup/webdav rejects filenames outside the backup pattern', asyn
 });
 
 test('DELETE /api/backup/webdav deletes the selected backup', async () => {
-  const kv = createKv({ session_token: '1' });
-  const db = createDb({
+  const { env } = buildEnv({
     settings: { webdav_url: 'https://dav.example.com/', webdav_username: 'u', webdav_password: 'p', webdav_dir: 'nav' },
   });
   const filename = 'iori-nav-backup-20260202-080000-000-20260202080000aaaaaaaaaaaaaaaaaa.json';
@@ -579,7 +532,7 @@ test('DELETE /api/backup/webdav deletes the selected backup', async () => {
 
   const response = await onRequestDelete({
     request: buildDeleteRequest(filename),
-    env: { NAV_AUTH: kv, NAV_DB: db },
+    env,
   });
   const body = await response.json();
 
@@ -595,7 +548,7 @@ test('DELETE /api/backup/webdav rejects unauthenticated and invalid filenames be
   const filename = 'iori-nav-backup-20260202-080000-000-20260202080000aaaaaaaaaaaaaaaaaa.json';
   const unauthenticated = await onRequestDelete({
     request: new Request(`https://example.com/api/backup/webdav?filename=${filename}`, { method: 'DELETE' }),
-    env: { NAV_AUTH: createKv(), NAV_DB: createDb() },
+    env: { NAV_AUTH: createKv() },
   });
   assert.equal(unauthenticated.status, 401);
 
@@ -606,10 +559,7 @@ test('DELETE /api/backup/webdav rejects unauthenticated and invalid filenames be
   });
   const invalid = await onRequestDelete({
     request: buildDeleteRequest('../../other.json'),
-    env: {
-      NAV_AUTH: createKv({ session_token: '1' }),
-      NAV_DB: createDb({ settings: { webdav_url: 'https://dav.example.com/', webdav_password: 'p' } }),
-    },
+    env: buildEnv({ settings: { webdav_url: 'https://dav.example.com/', webdav_password: 'p' } }).env,
   });
 
   assert.equal(invalid.status, 400);
@@ -622,10 +572,7 @@ test('DELETE /api/backup/webdav reports a backup already removed remotely', asyn
 
   const response = await onRequestDelete({
     request: buildDeleteRequest(filename),
-    env: {
-      NAV_AUTH: createKv({ session_token: '1' }),
-      NAV_DB: createDb({ settings: { webdav_url: 'https://dav.example.com/', webdav_password: 'p' } }),
-    },
+    env: buildEnv({ settings: { webdav_url: 'https://dav.example.com/', webdav_password: 'p' } }).env,
   });
   const body = await response.json();
 
@@ -634,8 +581,7 @@ test('DELETE /api/backup/webdav reports a backup already removed remotely', asyn
 });
 
 test('POST /api/backup/webdav supports non-ASCII credentials', async () => {
-  const kv = createKv({ session_token: '1' });
-  const db = createDb({
+  const { env } = buildEnv({
     settings: {
       webdav_url: 'https://dav.example.com/',
       webdav_username: '张三',
@@ -650,7 +596,7 @@ test('POST /api/backup/webdav supports non-ASCII credentials', async () => {
 
   const response = await onRequestPost({
     request: buildRequest(),
-    env: { NAV_AUTH: kv, NAV_DB: db },
+    env,
   });
   const body = await response.json();
 

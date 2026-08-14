@@ -2,7 +2,7 @@
 #  CONFIGURATION TEMPLATE FOR LOCAL DEVELOPMENT (`npm run dev`)
 #
 #  1. Copy this file to `wrangler.toml`.
-#  2. Replace the D1/KV placeholder IDs with your own Cloudflare resources.
+#  2. Replace the KV placeholder ID and your GitHub config with your own.
 #  3. Keep your real `wrangler.toml` out of Git.
 #
 #  This file is not used for Cloudflare Pages dashboard deployment settings.
@@ -16,16 +16,17 @@ pages_build_output_dir = "public"
 [build]
 command = "npm run build:css"
 
-[[d1_databases]]
-binding = "NAV_DB"
-database_name = "book"
-database_id = "PASTE_YOUR_D1_DATABASE_ID_HERE"
-
 [[kv_namespaces]]
 binding = "NAV_AUTH"
 id = "PASTE_YOUR_KV_NAMESPACE_ID_HERE"
 
 [vars]
+# 书签数据存储：项目不再使用 D1 数据库，书签直接以单个 JSON 文件存在 GitHub 仓库里。
+# GITHUB_REPO 必填，形如 "owner/repo"。
+GITHUB_REPO = "PASTE_YOUR_GITHUB_REPO"
+# 数据文件路径（默认 data/data.json）
+# GITHUB_DATA_PATH = "data/data.json"
+
 ENABLE_PUBLIC_SUBMISSION = false
 SITE_NAME = "灰色轨迹"
 SITE_DESCRIPTION = "一个优雅、快速、易于部署的书签（网址）收藏与分享平台，完全基于 Cloudflare 全家桶构建"
@@ -37,6 +38,10 @@ AI_REQUEST_DELAY = "1500"
 # Do not commit real secret keys.
 TURNSTILE_SITE_KEY = ""
 TURNSTILE_SECRET_KEY = ""
+
+# IMPORTANT: GITHUB_TOKEN 用于写书签数据（写操作必需），必须作为 Secret 配置，
+# 不要写进 wrangler.toml。本地开发时通过 `wrangler pages dev` 的环境变量注入。
+# GITHUB_TOKEN = ""
 
 # Optional: enable if you bind Cloudflare Workers AI for description generation.
 # [ai]

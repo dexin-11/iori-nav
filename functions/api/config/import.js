@@ -11,6 +11,7 @@ import {
     IMPORT_BODY_MAX_MB,
     validateImportSizes,
 } from '../../lib/validators';
+import { readFromGithub, saveData, nextId, nowSql } from '../../lib/github-data-store';
 
 function getImportIdKey(value) {
     return String(value ?? '');
@@ -21,30 +22,20 @@ function getImportParentIdKey(value) {
     return key === '' ? '0' : key;
 }
 
-function buildPrivateDescendantStatements(db, categoryId) {
-    const descendantsCte = `
-      WITH RECURSIVE descendants(id) AS (
-        SELECT id FROM category WHERE id = ?
-        UNION ALL
-        SELECT c.id FROM category c
-        INNER JOIN descendants d ON c.parent_id = d.id
-      )
-    `;
-
-    return [
-        db.prepare(`
-          ${descendantsCte}
-          UPDATE category
-          SET is_private = 1
-          WHERE id IN (SELECT id FROM descendants)
-        `).bind(categoryId),
-        db.prepare(`
-          ${descendantsCte}
-          UPDATE sites
-          SET is_private = 1
-          WHERE catelog_id IN (SELECT id FROM descendants)
-        `).bind(categoryId),
-    ];
+/**
+ * 返回 categoryId 及其全部后代分类的 id 集合
+ */
+function getDescendantIds(categories, rootId) {
+    const result = [];
+    const stack = [String(rootId)];
+    while (stack.length > 0) {
+        const id = stack.pop();
+        result.push(id);
+        for (const c of categories) {
+            if (String(c.parent_id) === String(id)) stack.push(String(c.id));
+        }
+    }
+    return result;
 }
 
 const ROOT_IMPORT_CATEGORY_NAME = '默认';
@@ -100,22 +91,15 @@ export async function onRequestPost(context) {
       return jsonResponse({ code: 200, message: 'Import successful, but no sites were found to import.' });
     }
 
-    const db = env.NAV_DB;
-    // Cloudflare D1 限制单条语句变量数为 100。
-    // 在导入过程中的 SELECT ... WHERE IN (...) 查询中，
-    // 将分块大小设为 50 以确保绝对安全且不影响效率。
-    const BATCH_SIZE = 50;
+    const { data, sha } = await readFromGithub(env);
+    const existingDbCategories = data.categories || [];
     let didMutate = false;
 
     // --- Category Processing ---
-    const oldCatIdToNewCatIdMap = new Map(); // Maps JSON ID -> DB ID
+    const oldCatIdToNewCatIdMap = new Map(); // Maps JSON ID -> New ID
     const privateCategoryIdsToPropagate = new Set();
     const normalizedImportCategoryNames = new Map();
     let categoryNameToIdMap = new Map(); // For legacy format mapping
-    
-    // 1. Fetch all existing categories from DB
-    const { results: existingDbCategoriesRaw } = await db.prepare('SELECT id, catelog, parent_id, is_private FROM category').all();
-    const existingDbCategories = existingDbCategoriesRaw || [];
     
     // Helper to find existing category by name and parent_id
     const findExistingCategory = (name, parentId) => {
@@ -173,11 +157,9 @@ export async function onRequestPost(context) {
             
             let dbParentId = 0;
             if (jsonParentIdKey !== '0') {
-                if (oldCatIdToNewCatIdMap.has(jsonParentIdKey)) {
-                    dbParentId = oldCatIdToNewCatIdMap.get(jsonParentIdKey);
-                } else {
-                    dbParentId = 0;
-                }
+                dbParentId = oldCatIdToNewCatIdMap.has(jsonParentIdKey)
+                    ? oldCatIdToNewCatIdMap.get(jsonParentIdKey)
+                    : 0;
             }
 
             const parentCategory = dbParentId
@@ -195,25 +177,30 @@ export async function onRequestPost(context) {
                 oldCatIdToNewCatIdMap.set(getImportIdKey(cat.id), existing.id);
             } else {
                 const sortOrder = normalizeSortOrder(cat.sort_order);
-                const result = await db.prepare('INSERT INTO category (catelog, sort_order, parent_id, is_private) VALUES (?, ?, ?, ?)')
-                                       .bind(catName, sortOrder, dbParentId, isPrivate)
-                                       .run();
-                let newId = result.meta.last_row_id;
-                didMutate = true;
-                
-                const newCatObj = { id: newId, catelog: catName, parent_id: dbParentId, is_private: isPrivate };
+                const newId = nextId(existingDbCategories);
+                const now = nowSql();
+                const newCatObj = {
+                    id: newId,
+                    catelog: catName,
+                    sort_order: sortOrder,
+                    parent_id: dbParentId,
+                    is_private: isPrivate,
+                    create_time: now,
+                    update_time: now,
+                };
                 existingDbCategories.push(newCatObj);
+                didMutate = true;
                 
                 oldCatIdToNewCatIdMap.set(getImportIdKey(cat.id), newId);
             }
         }
 
         if (privateCategoryIdsToPropagate.size > 0) {
-            const privateStatements = [];
-            privateCategoryIdsToPropagate.forEach(categoryId => {
-                privateStatements.push(...buildPrivateDescendantStatements(db, categoryId));
-            });
-            await db.batch(privateStatements);
+            for (const rootId of privateCategoryIdsToPropagate) {
+                const ids = new Set(getDescendantIds(existingDbCategories, rootId));
+                existingDbCategories.forEach(c => { if (ids.has(String(c.id))) c.is_private = 1; });
+                (data.sites || []).forEach(s => { if (ids.has(String(s.catelog_id))) s.is_private = 1; });
+            }
         }
 
         const hasRootSites = sitesToImport.some(site => getImportIdKey(site.catelog_id) === '0');
@@ -229,24 +216,23 @@ export async function onRequestPost(context) {
             if (existingRootCategory) {
                 oldCatIdToNewCatIdMap.set('0', existingRootCategory.id);
             } else {
-                const result = await db.prepare('INSERT INTO category (catelog, sort_order, parent_id, is_private) VALUES (?, ?, ?, ?)')
-                    .bind(rootCategoryName, 9999, 0, 0)
-                    .run();
-                const newRootCategoryId = result.meta.last_row_id;
+                const now = nowSql();
+                const newRootCategoryId = nextId(existingDbCategories);
                 existingDbCategories.push({
                     id: newRootCategoryId,
                     catelog: rootCategoryName,
+                    sort_order: 9999,
                     parent_id: 0,
                     is_private: 0,
+                    create_time: now,
+                    update_time: now,
                 });
                 oldCatIdToNewCatIdMap.set('0', newRootCategoryId);
                 didMutate = true;
             }
         }
     } else {
-        if (existingDbCategories) {
-             existingDbCategories.forEach(c => categoryNameToIdMap.set(c.catelog, c.id));
-        }
+        existingDbCategories.forEach(c => categoryNameToIdMap.set(c.catelog, c.id));
         const defaultCategory = 'Default';
         const categoryNames = [...new Set(sitesToImport.map(item => {
             const categoryNameResult = normalizeCategoryName(item.catelog || defaultCategory);
@@ -256,51 +242,38 @@ export async function onRequestPost(context) {
 
         if (newCategoryNames.length > 0) {
             // Legacy import doesn't have is_private info, defaults to 0
-            const insertStmts = newCategoryNames.map(name => db.prepare('INSERT INTO category (catelog, is_private) VALUES (?, 0)').bind(name));
-            await db.batch(insertStmts);
+            const now = nowSql();
+            newCategoryNames.forEach(name => {
+                const newId = nextId(existingDbCategories);
+                existingDbCategories.push({
+                    id: newId,
+                    catelog: name,
+                    sort_order: 9999,
+                    parent_id: 0,
+                    is_private: 0,
+                    create_time: now,
+                    update_time: now,
+                });
+                categoryNameToIdMap.set(name, newId);
+            });
             didMutate = true;
-            
-            for (let i = 0; i < newCategoryNames.length; i += BATCH_SIZE) {
-                const chunk = newCategoryNames.slice(i, i + BATCH_SIZE);
-                const placeholders = chunk.map(() => '?').join(',');
-                const { results: newCategories } = await db.prepare(`SELECT id, catelog, is_private FROM category WHERE catelog IN (${placeholders})`).bind(...chunk).all();
-                if (newCategories) {
-                    newCategories.forEach(c => {
-                        categoryNameToIdMap.set(c.catelog, c.id);
-                        existingDbCategories.push(c); // Update local cache
-                    });
-                }
-            }
         }
     }
 
     // --- Site Processing ---
-    const siteUrls = [...new Set(sitesToImport.flatMap(item => {
-        const urlResult = normalizeBookmarkUrl(item.url);
-        return urlResult.ok ? getUrlMatchCandidates(urlResult.value) : [];
-    }))];
     const existingSiteUrlMap = new Map();
-    if (siteUrls.length > 0) {
-        for (let i = 0; i < siteUrls.length; i += BATCH_SIZE) {
-            const chunk = siteUrls.slice(i, i + BATCH_SIZE);
-            const placeholders = chunk.map(() => '?').join(',');
-            const { results: existingSites } = await db.prepare(`SELECT url FROM sites WHERE url IN (${placeholders})`).bind(...chunk).all();
-            if (existingSites) {
-                existingSites.forEach(site => {
-                    const dbUrl = (site.url || '').trim();
-                    if (dbUrl) existingSiteUrlMap.set(dbUrl, dbUrl);
-                    getUrlMatchCandidates(dbUrl).forEach(candidate => existingSiteUrlMap.set(candidate, dbUrl));
-                });
-            }
-        }
-    }
+    (data.sites || []).forEach(site => {
+        const dbUrl = (site.url || '').trim();
+        if (dbUrl) existingSiteUrlMap.set(dbUrl, dbUrl);
+        getUrlMatchCandidates(dbUrl).forEach(candidate => existingSiteUrlMap.set(candidate, dbUrl));
+    });
 
-    const batchStmts = [];
     let itemsAdded = 0;
     let itemsUpdated = 0;
     let itemsSkipped = 0;
     const iconAPI = env.ICON_API || 'https://faviconsnap.com/api/favicon?url=';
     const processedUrls = new Set();
+    const now = nowSql();
 
     for (const site of sitesToImport) {
         const nameResult = normalizeBookmarkName(site.name);
@@ -395,32 +368,40 @@ export async function onRequestPost(context) {
         if (exists && override) {
             processedUrls.add(dedupKey);
             // Update
-            batchStmts.push(
-                db.prepare('UPDATE sites SET name=?, logo=?, desc=?, catelog_id=?, catelog_name=?, sort_order=COALESCE(?, sort_order), is_private=?, update_time=CURRENT_TIMESTAMP WHERE url=?')
-                  .bind(sanitizedName, sanitizedLogo, sanitizedDesc, newCatId, catNameForDb, sortOrderUpdate, finalIsPrivate, existingDbUrl)
-            );
+            const existing = (data.sites || []).find(s => s.url === existingDbUrl);
+            if (existing) {
+                existing.name = sanitizedName;
+                existing.logo = sanitizedLogo;
+                existing.desc = sanitizedDesc;
+                existing.catelog_id = newCatId;
+                existing.catelog_name = catNameForDb;
+                if (sortOrderUpdate !== null) existing.sort_order = sortOrderUpdate;
+                existing.is_private = finalIsPrivate;
+                existing.update_time = now;
+            }
             itemsUpdated++;
         } else {
             processedUrls.add(dedupKey);
             // Insert
-            batchStmts.push(
-                db.prepare('INSERT INTO sites (name, url, logo, desc, catelog_id, catelog_name, sort_order, is_private) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-                  .bind(sanitizedName, sanitizedUrl, sanitizedLogo, sanitizedDesc, newCatId, catNameForDb, sortOrderValue, finalIsPrivate)
-            );
+            (data.sites = data.sites || []).push({
+                id: nextId(data.sites),
+                name: sanitizedName,
+                url: sanitizedUrl,
+                logo: sanitizedLogo,
+                desc: sanitizedDesc,
+                catelog_id: newCatId,
+                catelog_name: catNameForDb,
+                sort_order: sortOrderValue,
+                is_private: finalIsPrivate,
+                create_time: now,
+                update_time: now,
+            });
             itemsAdded++;
         }
     }
 
-    if (batchStmts.length > 0) {
-        // Execute in batches to respect D1 limits
-        for (let i = 0; i < batchStmts.length; i += BATCH_SIZE) {
-            const chunk = batchStmts.slice(i, i + BATCH_SIZE);
-            await db.batch(chunk);
-        }
-        didMutate = true;
-    }
-
-    if (didMutate) {
+    if (didMutate || itemsAdded > 0 || itemsUpdated > 0) {
+        await saveData(env, data, sha);
         await markHomeCacheDirty(env, 'all');
     }
 

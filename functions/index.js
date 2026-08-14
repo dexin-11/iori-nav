@@ -6,7 +6,7 @@ import { getSettingsKeys, parseSettings } from './lib/settings-parser';
 import { renderHorizontalMenu, renderVerticalMenu } from './lib/menu-renderer';
 import { renderSiteCards, renderEmptyState } from './lib/card-renderer';
 import { buildCardHydrationState } from './lib/card-model';
-import { ensureSchemaReady } from './lib/schema-migration';
+import { loadData, getSettingsRows } from './lib/github-data-store';
 import { resolveWallpaperUrl } from './lib/wallpaper-defaults';
 
 // 模板内容在 Worker 运行时实例生命周期内不变（部署会替换实例），缓存避免每次 MISS 重复 ASSETS.fetch
@@ -73,14 +73,12 @@ export async function onRequest(context) {
       shouldClearCookie = true;
     }
 
-    // 并行读取 dirty 标记、缓存 HTML 与 schema 就绪状态。schema 检查从中间件移到此处，
-    // 命中 schemaReady 短路时与 KV 读同步完成；冷启动首请求也只消耗一次 KV 往返（max of 三者）
+    // 并行读取 dirty 标记与缓存 HTML
     let cachedHtml = null;
     try {
       [cacheDirtyValue, cachedHtml] = await Promise.all([
         getHomeCacheDirtyValue(env, cacheScope),
         env.NAV_AUTH.get(homeCacheKey),
-        ensureSchemaReady(env),
       ]);
     } catch (e) {
       console.warn('Failed to read home cache:', e);
@@ -106,46 +104,29 @@ export async function onRequest(context) {
     }
   }
 
-  // === 2. 并行执行数据库查询 + 模板获取 ===
-  const categoryQuery = isAuthenticated
-    ? 'SELECT id, catelog, sort_order, parent_id, is_private FROM category ORDER BY sort_order ASC, id ASC'
-    : 'SELECT id, catelog, sort_order, parent_id FROM category WHERE is_private = 0 ORDER BY sort_order ASC, id ASC';
-
+  // === 2. 并行执行数据读取 + 模板获取 ===
   const settingsKeys = getSettingsKeys();
-  const settingsPlaceholders = settingsKeys.map(() => '?').join(',');
-  // sort_order 仅用于 ORDER BY，不参与 SELECT（SQLite 允许）；前端不使用该字段
-  const sitesQuery = `SELECT id, name, url, logo, desc, catelog_id, catelog_name
-                      FROM sites WHERE (is_private = 0 OR ? = 1) ORDER BY sort_order ASC, create_time DESC`;
+  const fetchedData = await loadData(env);
 
-  // Settings 缓存：优先从 KV 读取，减少数据库查询
-  const settingsCacheKey = 'settings_cache';
-  const fetchSettings = async () => {
-    try {
-      const cached = await env.NAV_AUTH.get(settingsCacheKey, { type: 'json' });
-      if (cached) return { results: cached, fromCache: true };
-    } catch (e) {
-      console.warn('Settings cache read failed:', e);
-    }
-    const result = await env.NAV_DB.prepare(`SELECT key, value FROM settings WHERE key IN (${settingsPlaceholders})`).bind(...settingsKeys).all();
-    // 异步写入缓存，24h TTL；POST settings 时会主动清除（见 api/settings.js），
-    // 较长 TTL 减少 D1 兜底查询次数
-    if (result.results && env.NAV_AUTH) {
-      context.waitUntil(env.NAV_AUTH.put(settingsCacheKey, JSON.stringify(result.results), { expirationTtl: 86400 }));
-    }
-    return result;
-  };
+  // 分类：私密可见性由 isAuthenticated 决定
+  const rawCategories = fetchedData.categories || [];
+  const categories = rawCategories
+    .filter(c => isAuthenticated || Number(c.is_private) === 0)
+    .slice()
+    .sort((a, b) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0) || (Number(a.id) || 0) - (Number(b.id) || 0));
 
-  const [categoriesResult, settingsResult, sitesResult, templateHtml] = await Promise.all([
-    env.NAV_DB.prepare(categoryQuery).all().catch(e => ({ results: [], error: e })),
-    fetchSettings().catch(e => ({ results: [], error: e })),
-    env.NAV_DB.prepare(sitesQuery).bind(includePrivate).all().catch(e => ({ results: [], error: e })),
-    getTemplateHtml(env, request.url)
-  ]);
+  // 站点：仅公开或管理员可见，按 sort_order ASC、create_time DESC 排序
+  const allSites = (fetchedData.sites || [])
+    .filter(s => Number(s.is_private) === 0 || includePrivate === 1)
+    .slice()
+    .sort((a, b) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0) || String(b.create_time || '').localeCompare(String(a.create_time || '')));
+
+  // 设置：按 schema key 顺序取 [{ key, value }]
+  const settingsResult = getSettingsRows(fetchedData, settingsKeys);
+
+  const templateHtml = await getTemplateHtml(env, request.url);
 
   // === 3. 处理分类结果 — 构建分类树 ===
-  let categories = categoriesResult.results || [];
-  if (categoriesResult.error) console.error('Failed to fetch categories:', categoriesResult.error);
-
   const categoryMap = new Map();
   const categoryIdMap = new Map();
   const rootCategories = [];
@@ -172,11 +153,9 @@ export async function onRequest(context) {
   sortCats(rootCategories);
 
   // === 4. 解析设置 ===
-  const S = parseSettings(settingsResult.results || settingsResult);
+  const S = parseSettings(settingsResult);
 
-  // === 5. 处理站点结果 ===
-  let allSites = sitesResult.results || [];
-  if (sitesResult.error) return new Response(`Failed to fetch sites: ${sitesResult.error.message}`, { status: 500 });
+  // === 5. 站点结果已在第 2 步取得（allSites） ===
 
   function resolveCatalogId(catalogValue, options = {}) {
     const value = String(catalogValue || '').trim();

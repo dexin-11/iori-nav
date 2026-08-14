@@ -1,8 +1,8 @@
 import { isAdminAuthenticated, errorResponse, jsonResponse, markHomeCacheDirty } from '../../_middleware';
+import { readFromGithub, saveData, nowSql } from '../../lib/github-data-store';
 
 export async function onRequestPost(context) {
   const { request, env } = context;
-  const REORDER_CHUNK_SIZE = 100;
   
   if (!(await isAdminAuthenticated(request, env))) {
     return errorResponse('Unauthorized', 401);
@@ -17,28 +17,13 @@ export async function onRequestPost(context) {
       return errorResponse('未提供 ID', 400);
     }
 
-    // Cloudflare D1 限制单条语句变量数为 100。
-    // 在更新操作中，除了 ID 列表（Chunk），还有 SET 部分的参数（如 catelog_id, catelog_name）。
-    // 将分块大小设为 50 以确保变量总数绝对不会超过 100。
-    const CHUNK_SIZE = 50;
-    const chunks = [];
-    if (requiresIds) {
-      for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
-        chunks.push(ids.slice(i, i + CHUNK_SIZE));
-      }
-    }
-
-    const statements = [];
+    const { data, sha } = await readFromGithub(env);
+    const idSet = new Set((ids || []).map(String));
+    const now = nowSql();
 
     if (action === 'delete') {
-      chunks.forEach(chunk => {
-        const placeholders = chunk.map(() => '?').join(',');
-        statements.push(
-          env.NAV_DB.prepare(`DELETE FROM sites WHERE id IN (${placeholders})`).bind(...chunk)
-        );
-      });
-
-      await env.NAV_DB.batch(statements);
+      data.sites = (data.sites || []).filter(s => !idSet.has(String(s.id)));
+      await saveData(env, data, sha);
       await markHomeCacheDirty(env, 'all');
       
       return jsonResponse({
@@ -52,31 +37,29 @@ export async function onRequestPost(context) {
         return errorResponse('分类 ID 是必填项', 400);
       }
 
-      const category = await env.NAV_DB.prepare('SELECT catelog, is_private FROM category WHERE id = ?').bind(categoryId).first();
+      const category = (data.categories || []).find(c => String(c.id) === String(categoryId));
       if (!category) {
         return errorResponse('找不到分类', 404);
       }
 
-      let baseSql = `UPDATE sites SET catelog_id = ?, catelog_name = ?`;
-      const baseParams = [categoryId, category.catelog];
-
-      if (category.is_private === 1) {
-          baseSql += `, is_private = 1`;
-      }
-
-      chunks.forEach(chunk => {
-        const placeholders = chunk.map(() => '?').join(',');
-        statements.push(
-          env.NAV_DB.prepare(`${baseSql} WHERE id IN (${placeholders})`).bind(...baseParams, ...chunk)
-        );
+      let updated = 0;
+      (data.sites || []).forEach(s => {
+        if (!idSet.has(String(s.id))) return;
+        s.catelog_id = category.id;
+        s.catelog_name = category.catelog;
+        if (Number(category.is_private) === 1) {
+          s.is_private = 1;
+        }
+        s.update_time = now;
+        updated++;
       });
 
-      await env.NAV_DB.batch(statements);
+      await saveData(env, data, sha);
       await markHomeCacheDirty(env, 'all');
 
       return jsonResponse({
         code: 200,
-        message: `成功更新 ${ids.length} 条项目的分类`
+        message: `成功更新 ${updated} 条项目的分类`
       });
 
     } else if (action === 'update_privacy') {
@@ -86,20 +69,20 @@ export async function onRequestPost(context) {
       }
       
       const isPrivateValue = isPrivate ? 1 : 0;
-      
-      chunks.forEach(chunk => {
-        const placeholders = chunk.map(() => '?').join(',');
-        statements.push(
-          env.NAV_DB.prepare(`UPDATE sites SET is_private = ? WHERE id IN (${placeholders})`).bind(isPrivateValue, ...chunk)
-        );
+      let updated = 0;
+      (data.sites || []).forEach(s => {
+        if (!idSet.has(String(s.id))) return;
+        s.is_private = isPrivateValue;
+        s.update_time = now;
+        updated++;
       });
 
-      await env.NAV_DB.batch(statements);
+      await saveData(env, data, sha);
       await markHomeCacheDirty(env, 'all');
 
       return jsonResponse({
         code: 200,
-        message: `成功更新 ${ids.length} 条项目的隐私属性`
+        message: `成功更新 ${updated} 条项目的隐私属性`
       });
     } else if (action === 'reorder') {
       const items = payload?.items;
@@ -108,7 +91,8 @@ export async function onRequestPost(context) {
         return errorResponse('排序数据不能为空', 400);
       }
 
-      const reorderStatements = [];
+      const byId = new Map((data.sites || []).map(s => [String(s.id), s]));
+      let updated = 0;
 
       for (const item of items) {
         const id = Number(item.id);
@@ -117,22 +101,19 @@ export async function onRequestPost(context) {
         if (!Number.isFinite(id) || !Number.isFinite(sortOrder)) {
           return errorResponse('排序数据格式无效', 400);
         }
-
-        reorderStatements.push(
-          env.NAV_DB.prepare('UPDATE sites SET sort_order = ?, update_time = CURRENT_TIMESTAMP WHERE id = ?')
-            .bind(sortOrder, id)
-        );
+        const site = byId.get(String(id));
+        if (!site) continue;
+        site.sort_order = sortOrder;
+        site.update_time = now;
+        updated++;
       }
 
-      for (let i = 0; i < reorderStatements.length; i += REORDER_CHUNK_SIZE) {
-        await env.NAV_DB.batch(reorderStatements.slice(i, i + REORDER_CHUNK_SIZE));
-      }
-
+      await saveData(env, data, sha);
       await markHomeCacheDirty(env, 'all');
 
       return jsonResponse({
         code: 200,
-        message: `成功更新 ${items.length} 条项目的排序`
+        message: `成功更新 ${updated} 条项目的排序`
       });
     } else {
       return errorResponse('无效的操作', 400);

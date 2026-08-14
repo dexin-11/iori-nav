@@ -1,6 +1,7 @@
 // functions/api/categories/index.js
 import { isAdminAuthenticated, isSubmissionEnabled, errorResponse, jsonResponse } from '../../_middleware';
 import { parsePagination } from '../../lib/utils';
+import { loadData } from '../../lib/github-data-store';
 
 export async function onRequestGet(context) {
   const { request, env } = context;
@@ -18,30 +19,33 @@ export async function onRequestGet(context) {
   const { page, pageSize, offset } = parsePagination(url.searchParams, { maxPageSize });
 
   try {
-    const categoryFilter = shouldShowPublicOnly ? 'WHERE c.is_private = 0' : '';
-    const countFilter = shouldShowPublicOnly ? 'WHERE is_private = 0' : '';
-    const siteJoin = shouldShowPublicOnly
-      ? 'LEFT JOIN sites s ON c.id = s.catelog_id AND s.is_private = 0'
-      : 'LEFT JOIN sites s ON c.id = s.catelog_id';
+    const data = await loadData(env);
+    const allCategories = shouldShowPublicOnly
+      ? (data.categories || []).filter(c => Number(c.is_private) === 0)
+      : (data.categories || []).slice();
 
-    const { results } = await env.NAV_DB.prepare(`
-        SELECT c.id, c.catelog, c.sort_order, c.parent_id, c.is_private, COUNT(s.id) AS site_count
-        FROM category c
-        ${siteJoin}
-        ${categoryFilter}
-        GROUP BY c.id, c.catelog, c.sort_order, c.parent_id, c.is_private
-        ORDER BY c.sort_order ASC, c.create_time DESC
-        LIMIT ? OFFSET ?
-      `).bind(pageSize, offset).all();
-    const countResult = await env.NAV_DB.prepare(`
-      SELECT COUNT(*) as total FROM category ${countFilter}
-    `).first();
+    const sites = data.sites || [];
+    const results = allCategories
+      .map(c => {
+        const countSites = shouldShowPublicOnly
+          ? sites.filter(s => String(s.catelog_id) === String(c.id) && Number(s.is_private) === 0)
+          : sites.filter(s => String(s.catelog_id) === String(c.id));
+        return {
+          id: c.id,
+          catelog: c.catelog,
+          sort_order: c.sort_order,
+          parent_id: c.parent_id,
+          is_private: c.is_private,
+          site_count: countSites.length,
+        };
+      })
+      .sort((a, b) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0) || String(b.create_time || '').localeCompare(String(a.create_time || '')));
 
-    const total = countResult ? countResult.total : 0;
+    const total = results.length;
 
     return jsonResponse({
       code: 200,
-      data: results,
+      data: results.slice(offset, offset + pageSize),
       total,
       page,
       pageSize

@@ -4,10 +4,11 @@
 
 ## 项目概述
 
-**iori-nav（灰色轨迹）** 是一个基于 Cloudflare 全家桶构建的书签导航站点。
+**iori-nav（灰色轨迹）** 是一个基于 Cloudflare 全家桶构建的书签导航站点。书签数据直接以单个 JSON 文件存储在 GitHub 仓库里，不再依赖 D1 数据库。
 
 - **语言**: JavaScript（ES6+，无 TypeScript）
-- **平台**: Cloudflare Pages + Workers + D1 + KV
+- **平台**: Cloudflare Pages + Workers + KV
+- **数据存储**: GitHub Contents API（书签数据存为仓库内的单个 JSON 文件）
 - **前端**: HTML + TailwindCSS + 原生 JavaScript
 
 ## 目录结构
@@ -17,10 +18,10 @@ iori-nav/
 ├── functions/              # Cloudflare Pages Functions（后端）
 │   ├── _middleware.js      # 全局中间件（认证、CSRF、限流、缓存失效）
 │   ├── index.js            # 首页 SSR 渲染
-│   ├── constants.js        # SCHEMA_VERSION / HOME_CACHE_VERSION / DB_SCHEMA 等核心常量
+│   ├── constants.js        # HOME_CACHE_VERSION 等核心常量
 │   ├── admin/              # 管理后台（login.js, logout.js, index.js）
 │   ├── api/                # REST API（categories/, config/, pending/, cache/, settings.js, wallpaper.js 等）
-│   └── lib/                # 共用工具（card-renderer, menu-renderer, schema-migration, settings-parser, utils, wallpaper-fetcher）
+│   └── lib/                # 共用工具（card-renderer, menu-renderer, settings-parser, utils, wallpaper-fetcher, github-data-store）
 ├── public/                 # 静态资源（构建输出目录）
 │   ├── index.html          # 首页 SSR 模板
 │   ├── _headers            # Cloudflare Pages 响应头（静态资源长缓存配置）
@@ -28,7 +29,6 @@ iori-nav/
 │   ├── css/                # 样式文件
 │   └── js/                 # 前端脚本
 ├── scripts/                # 构建辅助脚本（update-versions, update-changelog）
-├── schema.sql              # D1 初始建表 SQL（runtime 会通过 ensureSchemaReady 自动追加后续迁移）
 └── wrangler.toml           # 本地开发配置（已 gitignore）
 ```
 
@@ -43,12 +43,6 @@ npm run build:css
 
 # 启动本地开发服务器
 npm run dev
-
-# 本地执行 SQL
-npx wrangler d1 execute book --local --file=schema.sql
-
-# 远程执行 SQL
-npx wrangler d1 execute book --remote --file=schema.sql
 ```
 
 **注意**: 本项目使用少量 npm 开发依赖（如 TailwindCSS、Husky），测试使用 Node.js 内置 `node:test`，暂无 lint 工具。
@@ -61,7 +55,7 @@ npx wrangler d1 execute book --remote --file=schema.sql
 
 - **文件**: 小写 + 连字符（`ai-chat.js`），动态路由用方括号（`[id].js`）
 - **函数**: camelCase（`isAdminAuthenticated`）
-- **常量**: UPPER_SNAKE_CASE（`DB_SCHEMA`）
+- **常量**: UPPER_SNAKE_CASE（`DATA_VERSION`）
 - **布尔变量**: is/has 前缀（`isValid`、`hasChildren`）
 
 ### 文件规模与提交规范
@@ -129,25 +123,48 @@ function sanitizeUrl(url) {
 }
 ```
 
-## 数据库操作
+## 数据存储（GitHub）
+
+项目不再使用 D1 数据库，所有数据（分类、书签、待审核、设置）都以单个 JSON 文件存在 GitHub 仓库里，通过 GitHub Contents API 读写。统一入口在 `functions/lib/github-data-store.js`。
+
+数据结构（`emptyData()`）：
 
 ```javascript
-// 使用参数绑定（防 SQL 注入）
-const { results } = await env.NAV_DB
-  .prepare('SELECT * FROM sites WHERE catelog_id = ?')
-  .bind(categoryId).all();
-
-// 查询单条
-const site = await env.NAV_DB.prepare('SELECT * FROM sites WHERE id = ?').bind(id).first();
-
-// 执行更新
-await env.NAV_DB.prepare('DELETE FROM sites WHERE id = ?').bind(id).run();
-
-// 批量执行
-await env.NAV_DB.batch([
-  env.NAV_DB.prepare('CREATE INDEX IF NOT EXISTS idx_sites_catelog_id ON sites(catelog_id)')
-]);
+{
+  version,        // 数据版本号
+  categories: [], // 分类
+  sites: [],      // 书签
+  pending_sites: [], // 待审核站点
+  settings: [],   // 设置 [{ key, value }]
+}
 ```
+
+核心 API：
+
+```javascript
+import {
+  readFromGithub,   // 直接读 GitHub（不过缓存），返回 { data, sha }；写操作前必须用它拿最新 SHA
+  loadData,         // 读数据，优先走 KV 缓存
+  saveData,         // 写回 GitHub 并刷新 KV 缓存
+  nextId,           // 计算集合内下一个自增 id (max + 1)
+  nowSql,           // UTC 时间串 YYYY-MM-DD HH:MM:SS
+} from '../lib/github-data-store';
+
+// 读
+const data = await loadData(env);
+
+// 写（必须先 readFromGithub 拿最新 sha，避免覆盖并发写入）
+const { data, sha } = await readFromGithub(env);
+data.sites.push({ id: nextId(data.sites), ... });
+await saveData(env, data, sha);
+```
+
+约定：
+
+- **读操作**用 `loadData`（走 KV 缓存，命中后不再请求 GitHub）。
+- **写操作**必须先用 `readFromGithub` 拿到最新 `sha`，再修改并以 `sha` 调用 `saveData`，避免并发写入互相覆盖。
+- **未配置 `GITHUB_REPO`** 时进入离线/测试模式，此时 KV 缓存是唯一数据源，`saveData` 只更新缓存，便于本地开发与单元测试。
+- 数据文件默认路径 `data/data.json`，可用 `GITHUB_DATA_PATH` 覆盖。
 
 ## 前端规范
 
@@ -169,8 +186,10 @@ function showToast(message) {
 
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
-| `NAV_DB` | D1 数据库绑定 | 必需 |
-| `NAV_AUTH` | KV 存储绑定 | 必需 |
+| `NAV_AUTH` | KV 存储绑定（会话、限流、数据缓存） | 必需 |
+| `GITHUB_REPO` | 数据仓库，形如 `owner/repo` | 必需 |
+| `GITHUB_DATA_PATH` | 数据文件路径 | `data/data.json` |
+| `GITHUB_TOKEN` | GitHub Personal Access Token（写操作必需，作为 Secret 配置） | 空 |
 | `ENABLE_PUBLIC_SUBMISSION` | 允许访客提交 | `false` |
 | `SITE_NAME` | 网站名称 | `灰色轨迹` |
 | `SITE_DESCRIPTION` | 首页副标题 | `一个优雅、快速、易于部署的书签（网址）收藏与分享平台，完全基于 Cloudflare 全家桶构建` |
@@ -186,40 +205,3 @@ function showToast(message) {
 2. **CSS 需构建**: 修改 `public/css/tailwind.css` 后执行 `npm run build:css`
 3. **SSR 渲染**: 首页通过 `functions/index.js` 服务端渲染，使用 `{{PLACEHOLDER}}` 模板替换
 4. **中文支持**: 注释和用户消息可使用中文
-
-## 数据库 Schema 迁移
-
-项目使用运行时 Schema 迁移，通过 KV 缓存迁移状态避免重复执行。
-
-### 迁移机制
-
-位置:
-
-- 迁移逻辑: `functions/lib/schema-migration.js` 中的 `ensureSchemaReady()` 函数
-- 版本号常量: `functions/constants.js` 中的 `SCHEMA_VERSION`
-
-```javascript
-// Schema 迁移版本号 - 修改此值会触发重新迁移
-const SCHEMA_VERSION = 'v4';
-```
-
-- 迁移成功后在 KV 中标记 `schema_migrated_{版本号}`（长期缓存，直到版本号变更）
-- 冷启动时只需 1 次 KV 读取即可跳过迁移
-
-### 添加新字段流程
-
-1. 在 `ensureSchemaReady()` 函数中添加新的 ALTER 语句
-2. **将 `SCHEMA_VERSION` 改为新版本号**（如 `v4` → `v5`）
-3. 部署代码后，首次请求会自动执行迁移
-
-### 示例
-
-```javascript
-// 1. 修改版本号
-const SCHEMA_VERSION = 'v5';
-
-// 2. 在 ensureSchemaReady() 中添加新字段检查
-if (!sitesCols.has('new_column')) {
-  alterStatements.push(env.NAV_DB.prepare("ALTER TABLE sites ADD COLUMN new_column TEXT"));
-}
-```

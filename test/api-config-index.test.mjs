@@ -3,17 +3,12 @@ import assert from 'node:assert/strict';
 
 import { onRequestGet } from '../functions/api/config/index.js';
 
-test('GET /api/config rejects overlong search keywords before querying database', async () => {
+test('GET /api/config rejects overlong search keywords before querying the data store', async () => {
   const request = new Request(`https://example.com/api/config?keyword=${'a'.repeat(101)}`);
   const env = {
     NAV_AUTH: {
       async get() {
         throw new Error('KV should not be queried for invalid keywords');
-      },
-    },
-    NAV_DB: {
-      prepare() {
-        throw new Error('DB should not be queried for invalid keywords');
       },
     },
   };

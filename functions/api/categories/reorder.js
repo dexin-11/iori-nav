@@ -1,6 +1,5 @@
 import { isAdminAuthenticated, errorResponse, jsonResponse, markHomeCacheDirty } from '../../_middleware';
-
-const REORDER_CHUNK_SIZE = 100;
+import { readFromGithub, saveData, nowSql } from '../../lib/github-data-store';
 
 export async function onRequestPost(context) {
   const { request, env } = context;
@@ -16,7 +15,10 @@ export async function onRequestPost(context) {
       return errorResponse('排序数据不能为空', 400);
     }
 
-    const statements = [];
+    const { data, sha } = await readFromGithub(env);
+    const byId = new Map((data.categories || []).map(c => [String(c.id), c]));
+    const now = nowSql();
+    let updated = 0;
 
     for (const item of items) {
       const id = Number(item.id);
@@ -26,22 +28,19 @@ export async function onRequestPost(context) {
         return errorResponse('排序数据格式无效', 400);
       }
 
-      statements.push(
-        env.NAV_DB.prepare(
-          'UPDATE category SET sort_order = ?, update_time = CURRENT_TIMESTAMP WHERE id = ?'
-        ).bind(sortOrder, id)
-      );
+      const category = byId.get(String(id));
+      if (!category) continue;
+      category.sort_order = sortOrder;
+      category.update_time = now;
+      updated++;
     }
 
-    for (let i = 0; i < statements.length; i += REORDER_CHUNK_SIZE) {
-      await env.NAV_DB.batch(statements.slice(i, i + REORDER_CHUNK_SIZE));
-    }
-
+    await saveData(env, data, sha);
     await markHomeCacheDirty(env, 'all');
 
     return jsonResponse({
       code: 200,
-      message: `成功更新 ${items.length} 个分类的排序`
+      message: `成功更新 ${updated} 个分类的排序`
     });
   } catch (e) {
     return errorResponse(`保存分类排序失败: ${e.message}`, 500);

@@ -2,49 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { onRequestPut } from '../functions/api/config/[id].js';
-
-function createKv(initialEntries = {}) {
-  const store = new Map(Object.entries(initialEntries));
-  return {
-    store,
-    async get(key) {
-      return store.get(key) ?? null;
-    },
-    async put(key, value) {
-      store.set(key, value);
-    },
-  };
-}
-
-function createDb({ category }) {
-  return {
-    prepare(sql) {
-      return {
-        bind(...params) {
-          return {
-            async first() {
-              if (sql.includes('SELECT id, is_private FROM sites')) {
-                return { id: 1, is_private: 0 };
-              }
-              if (sql.includes('SELECT id FROM sites WHERE url IN')) {
-                return null;
-              }
-              if (sql.includes('SELECT catelog, is_private FROM category')) {
-                return category;
-              }
-              throw new Error(`Unexpected first() SQL: ${sql}`);
-            },
-            async run() {
-              throw new Error(`Unexpected run() SQL: ${sql} ${JSON.stringify(params)}`);
-            },
-          };
-        },
-      };
-    },
-  };
-}
+import { createKv, seedData, emptyData } from './helpers/github-data-store.mjs';
 
 test('PUT /api/config/:id rejects updates to a missing category', async () => {
+  const kv = createKv({ session_token: '1' });
+  const data = emptyData();
+  data.sites = [{ id: 1, name: 'Example', url: 'https://example.com', catelog_id: 999, is_private: 0 }];
+  seedData(kv, data);
+
   const request = new Request('https://example.com/api/config/1', {
     method: 'PUT',
     headers: {
@@ -59,8 +24,7 @@ test('PUT /api/config/:id rejects updates to a missing category', async () => {
     }),
   });
   const env = {
-    NAV_AUTH: createKv({ session_token: '1' }),
-    NAV_DB: createDb({ category: null }),
+    NAV_AUTH: kv,
   };
 
   const response = await onRequestPut({ request, env, params: { id: '1' } });
@@ -72,6 +36,12 @@ test('PUT /api/config/:id rejects updates to a missing category', async () => {
 });
 
 test('PUT /api/config/:id rejects unsafe bookmark URLs before updating', async () => {
+  const kv = createKv({ session_token: '1' });
+  const data = emptyData();
+  data.sites = [{ id: 1, name: 'Example', url: 'https://example.com', catelog_id: 1, is_private: 0 }];
+  data.categories = [{ id: 1, catelog: 'Default', is_private: 0 }];
+  seedData(kv, data);
+
   const request = new Request('https://example.com/api/config/1', {
     method: 'PUT',
     headers: {
@@ -86,8 +56,7 @@ test('PUT /api/config/:id rejects unsafe bookmark URLs before updating', async (
     }),
   });
   const env = {
-    NAV_AUTH: createKv({ session_token: '1' }),
-    NAV_DB: createDb({ category: { catelog: 'Default', is_private: 0 } }),
+    NAV_AUTH: kv,
   };
 
   const response = await onRequestPut({ request, env, params: { id: '1' } });

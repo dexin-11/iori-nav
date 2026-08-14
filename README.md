@@ -1,7 +1,7 @@
 # 灰色轨迹 - 精品网址导航站
 
 <p align="center">
-  一个优雅、快速、易于部署的书签（网址）收藏与分享平台，完全基于 Cloudflare 全家桶构建。
+  一个优雅、快速、易于部署的书签（网址）收藏与分享平台，完全基于 Cloudflare 全家桶构建。书签数据直接以单个 JSON 文件保存在 GitHub 仓库中，无需数据库。
 </p>
 
 <p align="center">
@@ -62,7 +62,7 @@
 | 📂 **分类清晰** | 通过多级分类组织书签，浏览直观高效 |
 | 🔒 **安全后台** | 基于 KV 的管理员认证，提供完整的书签增删改查后台 |
 | 📝 **用户提交** | 支持访客提交书签，经管理员审核后显示（可通过环境变量关闭） |
-| ⚡ **性能卓越** | 利用 Cloudflare 边缘缓存，秒级加载，节省 D1 数据库读取成本 |
+| ⚡ **性能卓越** | 利用 Cloudflare 边缘缓存与 KV，秒级加载，书签数据由 GitHub 存储 |
 | 📤 **数据管理** | 支持书签数据的导入与导出，兼容 Chrome 导出的 HTML 格式，也可从公共书签库一键导入 |
 
 ---
@@ -100,12 +100,11 @@
 
 <img width="2112" height="1404" alt="构建设置" src="https://github.com/user-attachments/assets/654a23af-d75f-477d-848e-fea8a41740dc" />
 
-### 步骤 3：创建 D1 数据库
+### 步骤 3：创建 Git 数据仓库（可选）
 
-1. 在 Cloudflare 控制台，进入 `存储和数据库` → `D1 SQL 数据库`。
-2. 点击 `创建数据库`，数据库名称输入 `book`，然后创建。
+项目不再使用 D1 数据库，书签数据默认存放在 **当前仓库** 的 `data/data.json` 文件里。若你 Fork 后希望把书签数据保存到独立仓库，可新建一个空仓库，并在环境变量中通过 `GITHUB_REPO`（形如 `owner/repo`）指定。
 
-<img width="2836" height="1298" alt="创建D1数据库" src="https://github.com/user-attachments/assets/644032c6-304c-46cc-b039-9eafbc6f7a6b" />
+为让 Pages Functions 能写书签数据，请为用于访问该仓库的账号创建一个 **Personal Access Token**（`Fine-grained token`，仓库权限勾选 `Contents: Read and write`），并在部署时作为 `GITHUB_TOKEN` 机密配置。
 
 ### 步骤 4：创建 KV 存储
 
@@ -120,17 +119,16 @@
 
     <img width="2810" height="1188" alt="设置KV条目" src="https://github.com/user-attachments/assets/2114e42b-03d2-400f-a8f8-54dc156a7922" />
 
-### 步骤 5：绑定服务
+### 步骤 5：绑定服务与配置变量
 
 1. 进入你刚刚创建的 Pages 项目的 `设置` → `绑定`。
-2. 点击 `添加绑定`，选择 `D1 数据库`：
-    - 变量名称：`NAV_DB`
-    - D1 数据库：选择你创建的 `book`
-3. 点击 `添加绑定`，选择 `KV 命名空间`：
+2. 点击 `添加绑定`，选择 `KV 命名空间`：
     - 变量名称：`NAV_AUTH`
     - KV 命名空间：选择你创建的 `NAV_AUTH`
-4. 如需使用 Cloudflare Workers AI，继续点击 `添加绑定`，选择 `Workers AI`：
-    - 变量名称：`AI`
+3. 在 `设置` → `变量和机密` 中配置（「变量」与「机密」分别管理）：
+    - `GITHUB_REPO`（变量）：数据仓库，形如 `owner/repo`，不填则默认写入当前仓库 `data/data.json`，并进入离线模式（仅用 KV 缓存读写）
+    - `GITHUB_TOKEN`（机密）：写书签数据必需的令牌
+    - 如需使用 Cloudflare Workers AI，继续点击 `添加绑定`，选择 `Workers AI`，变量名称：`AI`
 
 <img width="2152" height="1236" alt="绑定服务" src="./image/bind.png" />
 
@@ -150,7 +148,7 @@
 # 安装依赖（TailwindCSS / Husky）
 npm install
 
-# 复制本地配置模板，并填入你自己的 D1/KV 资源 ID
+# 复制本地配置模板，并填入你自己的 KV 资源 ID 与 GitHub 配置
 cp wrangler.example.toml wrangler.toml
 
 # 构建 CSS（首次或修改 tailwind.css 后执行）
@@ -158,10 +156,9 @@ npm run build:css
 
 # 启动本地开发服务器
 npm run dev
-
-# 本地执行数据库 schema（可选）
-npx wrangler d1 execute book --local --file=schema.sql
 ```
+
+> 💡 本地未配置 `GITHUB_REPO` 时会进入离线模式，数据仅通过 KV 缓存读写，便于本地开发与测试。
 
 ---
 
@@ -171,8 +168,7 @@ npx wrangler d1 execute book --local --file=schema.sql
 
 | 绑定名 | 类型 | 说明 |
 | :--- | :--- | :--- |
-| `NAV_DB` | D1 | 主数据库绑定（必需） |
-| `NAV_AUTH` | KV | 会话、限流、缓存标记存储（必需） |
+| `NAV_AUTH` | KV | 会话、限流、数据缓存存储（必需） |
 ### 2) 条件绑定（Pages 项目设置 -> 绑定）
 
 | 绑定名 | 类型 | 说明 |
@@ -183,6 +179,9 @@ npx wrangler d1 execute book --local --file=schema.sql
 
 | 变量名 | 默认值 | 说明 |
 | :--- | :--- | :--- |
+| `GITHUB_REPO` | 当前仓库 | 书签数据仓库，形如 `owner/repo`；不填则默认写入当前仓库 `data/data.json` 并进入离线模式 |
+| `GITHUB_DATA_PATH` | `data/data.json` | 数据文件在仓库中的路径 |
+| `GITHUB_TOKEN` | 空 | GitHub Personal Access Token（机密）；写书签数据必需 |
 | `ENABLE_PUBLIC_SUBMISSION` | `false` | 是否允许访客投稿 |
 | `SITE_NAME` | `灰色轨迹` | 首页站点名称（环境变量兜底） |
 | `SITE_DESCRIPTION` | `一个优雅、快速、易于部署的书签（网址）收藏与分享平台，完全基于 Cloudflare 全家桶构建` | 首页副标题（环境变量兜底） |
@@ -197,7 +196,7 @@ npx wrangler d1 execute book --local --file=schema.sql
 
 ### 3) 配置优先级说明
 
-- 首页名称/副标题等支持后台设置项的字段，优先读取数据库 `settings`，环境变量作为兜底。
+- 首页名称/副标题等支持后台设置项的字段，优先读取数据文件中的 `settings`，环境变量作为兜底。
 - `AI_REQUEST_DELAY` 在代码中的默认兜底为 `1500`；本地可按 API 限频自行调整。
 - Workers AI 的模型可以在后台 AI 设置中手动填写；需要使用 Workers AI 的 `@cf/...` 模型名。
 - Workers AI 设置推荐：`@cf/google/gemma-4-26b-a4b-it`（默认）、`@cf/mistralai/mistral-small-3.1-24b-instruct`、`@cf/qwen/qwq-32b`、`@cf/qwen/qwen3-30b-a3b-fp8`、`@cf/meta/llama-3.1-8b-instruct-fp8`。其余模型请自行测试。
@@ -244,7 +243,7 @@ npx wrangler d1 execute book --local --file=schema.sql
 ## ❗ 常见部署问题
 
 - `/admin` 无法登录或反复跳回登录页：确认已绑定 `NAV_AUTH`，并在该 KV 中创建 `admin_username`、`admin_password`。
-- 首页 500 或数据为空：确认 `NAV_DB` 已正确绑定到 `book` 数据库，且已执行过 `schema.sql`。
+- 首页 500 或数据为空：确认 `GITHUB_TOKEN` 已正确配置（写操作需要），且 `GITHUB_REPO` 指向的仓库存在；离线下 KV 缓存为空时首页会显示空数据。
 - 前台看不到投稿入口：确认 `ENABLE_PUBLIC_SUBMISSION=true`（字符串或布尔都可，代码会统一转换）。
 - 修改了 `public/css/tailwind.css` 但样式未生效：先执行 `npm run build:css` 再重新部署。
 
@@ -255,8 +254,7 @@ npx wrangler d1 execute book --local --file=schema.sql
 | 类别 | 技术 |
 | :--- | :--- |
 | **计算** | [Cloudflare Workers](https://workers.cloudflare.com/) |
-| **数据库** | [Cloudflare D1](https://developers.cloudflare.com/d1/) |
-| **存储** | [Cloudflare KV](https://developers.cloudflare.com/workers/runtime-apis/kv/) |
+| **数据存储** | [GitHub Contents API](https://docs.github.com/en/rest/contents/contents)（单个 JSON 文件）+ [Cloudflare KV](https://developers.cloudflare.com/workers/runtime-apis/kv/) 缓存 |
 | **前端框架** | [TailwindCSS](https://tailwindcss.com/) |
 
 ---

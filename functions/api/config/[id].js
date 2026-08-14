@@ -2,19 +2,20 @@
 import { isAdminAuthenticated, errorResponse, jsonResponse, normalizeSortOrder, markHomeCacheDirty } from '../../_middleware';
 import { buildFaviconUrl, getUrlMatchCandidates, normalizeUrlForStorage } from '../../lib/utils';
 import { normalizeBookmarkDesc, normalizeBookmarkLogo, normalizeBookmarkName, normalizeBookmarkUrl } from '../../lib/validators';
+import { loadData, readFromGithub, saveData, nowSql } from '../../lib/github-data-store';
 
 
 export async function onRequestGet(context) {
   const { request, env, params } = context;
   const id = params.id;
-  const { results } = await env.NAV_DB.prepare('SELECT * FROM sites WHERE id = ?').bind(id).all();
-  if (results.length === 0) {
+  const data = await loadData(env);
+  const config = (data.sites || []).find(s => String(s.id) === String(id));
+  if (!config) {
     return errorResponse('config not found', 404);
   }
-  const config = results[0];
   
   // 私密站点需要认证才能访问
-  if (config.is_private && !(await isAdminAuthenticated(request, env))) {
+  if (Number(config.is_private) && !(await isAdminAuthenticated(request, env))) {
     return errorResponse('config not found', 404);
   }
   
@@ -33,7 +34,8 @@ export async function onRequestPut(context) {
   }
   
   try {
-    const existing = await env.NAV_DB.prepare('SELECT id, is_private FROM sites WHERE id = ?').bind(id).first();
+    const { data, sha } = await readFromGithub(env);
+    const existing = (data.sites || []).find(s => String(s.id) === String(id));
     if (!existing) {
       return errorResponse('config not found', 404);
     }
@@ -69,10 +71,7 @@ export async function onRequestPut(context) {
     }
 
     const urlCandidates = getUrlMatchCandidates(rawUrl);
-    const placeholders = urlCandidates.map(() => '?').join(',');
-    const duplicate = await env.NAV_DB.prepare(`SELECT id FROM sites WHERE url IN (${placeholders}) AND id != ?`)
-      .bind(...urlCandidates, id)
-      .first();
+    const duplicate = (data.sites || []).find(s => urlCandidates.includes(s.url) && String(s.id) !== String(id));
     if (duplicate) {
       return errorResponse('该 URL 已存在，请勿重复添加', 409);
     }
@@ -81,31 +80,36 @@ export async function onRequestPut(context) {
     sanitizedLogo = buildFaviconUrl(sanitizedUrl, sanitizedLogo, iconAPI);
 
     // Fetch category name
-    const categoryResult = await env.NAV_DB.prepare('SELECT catelog, is_private FROM category WHERE id = ?').bind(catelog_id).first();
-    if (!categoryResult) {
+    const category = (data.categories || []).find(c => String(c.id) === String(catelog_id));
+    if (!category) {
       return errorResponse('Category not found.', 400);
     }
-    const catelogName = categoryResult.catelog;
+    const catelogName = category.catelog;
 
     // If category is private, force site to be private
     let finalIsPrivate = isPrivateValue;
-    if (categoryResult.is_private === 1) {
+    if (Number(category.is_private) === 1) {
         finalIsPrivate = 1;
     }
 
-    const update = await env.NAV_DB.prepare(`
-      UPDATE sites
-      SET name = ?, url = ?, logo = ?, desc = ?, catelog_id = ?, catelog_name = ?, sort_order = ?, is_private = ?, update_time = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `).bind(sanitizedName, sanitizedUrl, sanitizedLogo, sanitizedDesc, catelog_id, catelogName, sortOrderValue, finalIsPrivate, id).run();
+    existing.name = sanitizedName;
+    existing.url = sanitizedUrl;
+    existing.logo = sanitizedLogo;
+    existing.desc = sanitizedDesc;
+    existing.catelog_id = category.id;
+    existing.catelog_name = catelogName;
+    existing.sort_order = sortOrderValue;
+    existing.is_private = finalIsPrivate;
+    existing.update_time = nowSql();
 
-    const dirtyScope = (existing.is_private === 1 && finalIsPrivate === 1) ? 'private' : 'all';
+    await saveData(env, data, sha);
+
+    const dirtyScope = (Number(existing.is_private) === 1 && finalIsPrivate === 1) ? 'private' : 'all';
     await markHomeCacheDirty(env, dirtyScope);
 
     return jsonResponse({
       code: 200,
-      message: 'Config updated successfully',
-      update
+      message: 'Config updated successfully'
     });
   } catch (e) {
     return errorResponse(`Failed to update config: ${e.message}`, 500);
@@ -121,19 +125,20 @@ export async function onRequestDelete(context) {
   }
 
   try {
-    const existing = await env.NAV_DB.prepare('SELECT id, is_private FROM sites WHERE id = ?').bind(id).first();
+    const { data, sha } = await readFromGithub(env);
+    const existing = (data.sites || []).find(s => String(s.id) === String(id));
     if (!existing) {
       return errorResponse('config not found', 404);
     }
 
-    const del = await env.NAV_DB.prepare('DELETE FROM sites WHERE id = ?').bind(id).run();
+    data.sites = (data.sites || []).filter(s => String(s.id) !== String(id));
+    await saveData(env, data, sha);
 
-    await markHomeCacheDirty(env, existing.is_private ? 'private' : 'all');
+    await markHomeCacheDirty(env, Number(existing.is_private) ? 'private' : 'all');
 
     return jsonResponse({
       code: 200,
-      message: 'Config deleted successfully',
-      del
+      message: 'Config deleted successfully'
     });
   } catch (e) {
     return errorResponse(`Failed to delete config: ${e.message}`, 500);

@@ -1,7 +1,8 @@
 // functions/api/config/index.js
 import { isAdminAuthenticated, errorResponse, jsonResponse, normalizeSortOrder, markHomeCacheDirty } from '../../_middleware';
-import { escapeLikePattern, buildFaviconUrl, getUrlMatchCandidates, normalizeUrlForStorage, parsePagination } from '../../lib/utils';
+import { buildFaviconUrl, getUrlMatchCandidates, normalizeUrlForStorage, parsePagination } from '../../lib/utils';
 import { normalizeBookmarkDesc, normalizeBookmarkLogo, normalizeBookmarkName, normalizeBookmarkUrl } from '../../lib/validators';
+import { loadData, readFromGithub, saveData, nextId, nowSql } from '../../lib/github-data-store';
 
 const MAX_CONFIG_SEARCH_KEYWORD_LENGTH = 100;
 
@@ -22,34 +23,23 @@ export async function onRequestGet(context) {
   const includePrivate = isAuthenticated ? 1 : 0;
 
   try {
-    // 基础查询：不再关联 category，直接查 sites 表，提高性能
-    // 注意：始终筛选 (is_private = 0 OR includePrivate = 1)
-    let queryBase = `FROM sites s WHERE (s.is_private = 0 OR ? = 1)`;
-    let queryBindParams = [includePrivate];
+    const data = await loadData(env);
+    const kw = keyword.toLowerCase();
+    let results = (data.sites || []).filter(s => {
+      if (Number(s.is_private) !== 0 && includePrivate !== 1) return false;
+      if (catalogId && String(s.catelog_id) !== String(catalogId)) return false;
+      if (catalog && s.catelog_name !== catalog) return false;
+      if (kw) {
+        const haystack = [s.name, s.url, s.catelog_name, s.desc].map(v => String(v ?? '')).join(' ').toLowerCase();
+        if (!haystack.includes(kw)) return false;
+      }
+      return true;
+    });
 
-    if (catalogId) {
-      queryBase += ` AND s.catelog_id = ?`;
-      queryBindParams.push(catalogId);
-    } else if (catalog) {
-      queryBase += ` AND s.catelog_name = ?`;
-      queryBindParams.push(catalog);
-    }
-
-    if (keyword) {
-      const escaped = escapeLikePattern(keyword);
-      queryBase += ` AND (name LIKE ? ESCAPE '\\' OR url LIKE ? ESCAPE '\\' OR catelog_name LIKE ? ESCAPE '\\' OR s.desc LIKE ? ESCAPE '\\')`;
-      queryBindParams.push(`%${escaped}%`, `%${escaped}%`, `%${escaped}%`, `%${escaped}%`);
-    }
-
-    const query = `SELECT * ${queryBase} ORDER BY sort_order ASC, create_time DESC LIMIT ? OFFSET ?`;
-    const countQuery = `SELECT COUNT(*) as total ${queryBase}`;
-    
-    // 添加分页参数
-    const fullBindParams = [...queryBindParams, pageSize, offset];
-    const { results } = await env.NAV_DB.prepare(query).bind(...fullBindParams).all();
-    
-    const countResult = await env.NAV_DB.prepare(countQuery).bind(...queryBindParams).first();
-    const total = countResult ? countResult.total : 0;
+    const total = results.length;
+    results = results
+      .sort((a, b) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0) || String(b.create_time || '').localeCompare(String(a.create_time || '')))
+      .slice(offset, offset + pageSize);
 
     return jsonResponse({
       code: 200,
@@ -103,39 +93,50 @@ export async function onRequestPost(context) {
       return errorResponse('URL must be a valid http or https URL', 400);
     }
 
+    const { data, sha } = await readFromGithub(env);
+
     // Check if URL already exists
     const urlCandidates = getUrlMatchCandidates(rawUrl);
-    const placeholders = urlCandidates.map(() => '?').join(',');
-    const existingSite = await env.NAV_DB.prepare(`SELECT id FROM sites WHERE url IN (${placeholders})`).bind(...urlCandidates).first();
+    const existingSite = (data.sites || []).find(s => urlCandidates.includes(s.url));
     if (existingSite) {
         return errorResponse('该 URL 已存在，请勿重复添加', 409);
     }
 
     sanitizedLogo = buildFaviconUrl(sanitizedUrl, sanitizedLogo, iconAPI);
-    // Find the category ID from the category name
-    const categoryResult = await env.NAV_DB.prepare('SELECT catelog, is_private FROM category WHERE id = ?').bind(catelogId).first();
+    // Find the category from the category id
+    const category = (data.categories || []).find(c => String(c.id) === String(catelogId));
 
-    if (!categoryResult) {
+    if (!category) {
       return errorResponse(`Category not found.`, 400);
     }
     
     // If category is private, force site to be private
     let finalIsPrivate = isPrivateValue;
-    if (categoryResult.is_private === 1) {
+    if (Number(category.is_private) === 1) {
         finalIsPrivate = 1;
     }
 
-    const insert = await env.NAV_DB.prepare(`
-      INSERT INTO sites (name, url, logo, desc, catelog_id, catelog_name, sort_order, is_private)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).bind(sanitizedName, sanitizedUrl, sanitizedLogo, sanitizedDesc, catelogId, categoryResult.catelog, sortOrderValue, finalIsPrivate).run();
+    const now = nowSql();
+    data.sites.push({
+      id: nextId(data.sites),
+      name: sanitizedName,
+      url: sanitizedUrl,
+      logo: sanitizedLogo,
+      desc: sanitizedDesc,
+      catelog_id: category.id,
+      catelog_name: category.catelog,
+      sort_order: sortOrderValue,
+      is_private: finalIsPrivate,
+      create_time: now,
+      update_time: now,
+    });
 
+    await saveData(env, data, sha);
     await markHomeCacheDirty(env, finalIsPrivate ? 'private' : 'all');
 
     return jsonResponse({
       code: 201,
-      message: 'Config created successfully',
-      insert
+      message: 'Config created successfully'
     }, 201);
   } catch (e) {
     return errorResponse(`Failed to create config: ${e.message}`, 500);

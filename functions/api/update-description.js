@@ -2,6 +2,7 @@
 import { isAdminAuthenticated, errorResponse, jsonResponse, markHomeCacheDirty } from '../_middleware';
 import { buildFaviconUrl } from '../lib/utils';
 import { normalizeBookmarkDesc, normalizeBookmarkLogo, normalizeOptionalBookmarkUrl } from '../lib/validators';
+import { readFromGithub, saveData, nowSql } from '../lib/github-data-store';
 
 export async function onRequestPost(context) {
   const { request, env } = context;
@@ -28,9 +29,8 @@ export async function onRequestPost(context) {
     const logoResult = normalizeBookmarkLogo(logo, { nullIfEmpty: true });
     if (!logoResult.ok) return errorResponse(logoResult.message, 400);
 
-    const site = await env.NAV_DB.prepare(
-      'SELECT id, is_private FROM sites WHERE id = ?'
-    ).bind(id).first();
+    const { data, sha } = await readFromGithub(env);
+    const site = (data.sites || []).find(s => String(s.id) === String(id));
 
     if (!site) {
       return errorResponse('Bookmark not found', 404);
@@ -39,14 +39,11 @@ export async function onRequestPost(context) {
     const iconAPI = env.ICON_API || 'https://faviconsnap.com/api/favicon?url=';
     const sanitizedLogo = buildFaviconUrl(urlResult.value, logoResult.value, iconAPI);
 
-    // 3. 更新数据库
-    const result = await env.NAV_DB.prepare(
-      'UPDATE sites SET desc = ?, logo = ?, update_time = CURRENT_TIMESTAMP WHERE id = ?'
-    ).bind(descResult.value, sanitizedLogo, id).run();
-
-    if (result.changes === 0) {
-        return errorResponse('Bookmark not found or no changes made', 404);
-    }
+    // 3. 更新数据
+    site.desc = descResult.value;
+    site.logo = sanitizedLogo;
+    site.update_time = nowSql();
+    await saveData(env, data, sha);
 
     await markHomeCacheDirty(env, site.is_private ? 'private' : 'all');
 

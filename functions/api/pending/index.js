@@ -1,6 +1,7 @@
 // functions/api/pending/index.js
 import { isAdminAuthenticated, errorResponse, jsonResponse } from '../../_middleware';
 import { parsePagination } from '../../lib/utils';
+import { loadData } from '../../lib/github-data-store';
 
 export async function onRequestGet(context) {
   const { request, env } = context;
@@ -13,23 +14,16 @@ export async function onRequestGet(context) {
   const { page, pageSize, offset } = parsePagination(url.searchParams, { maxPageSize: 200 });
 
   try {
-    const { results } = await env.NAV_DB.prepare(`
-      SELECT p.*, c.catelog
-      FROM pending_sites p
-      LEFT JOIN category c ON p.catelog_id = c.id
-      ORDER BY p.create_time DESC
-      LIMIT ? OFFSET ?
-    `).bind(pageSize, offset).all();
-    
-    const countResult = await env.NAV_DB.prepare(`
-      SELECT COUNT(*) as total FROM pending_sites
-    `).first();
-    
-    const total = countResult ? countResult.total : 0;
+    const data = await loadData(env);
+    const all = (data.pending_sites || [])
+      .slice()
+      .sort((a, b) => String(b.create_time || '').localeCompare(String(a.create_time || '')));
+
+    const total = all.length;
 
     return jsonResponse({
       code: 200,
-      data: results,
+      data: all.slice(offset, offset + pageSize),
       total,
       page,
       pageSize

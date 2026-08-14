@@ -2,55 +2,23 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { onRequestPut } from '../functions/api/pending/[id].js';
-
-function createKv(initialEntries = {}) {
-  const store = new Map(Object.entries(initialEntries));
-  return {
-    async get(key) {
-      return store.get(key) ?? null;
-    },
-  };
-}
+import { createKv, seedData, emptyData } from './helpers/github-data-store.mjs';
 
 test('PUT /api/pending/:id matches legacy root URL forms before approval', async () => {
-  let duplicateParams = null;
-  const db = {
-    prepare(sql) {
-      return {
-        bind(...params) {
-          return {
-            async all() {
-              if (sql.includes('SELECT * FROM pending_sites')) {
-                return {
-                  results: [{
-                    id: 1,
-                    name: 'Example',
-                    url: 'https://example.com/',
-                    logo: '',
-                    desc: '',
-                    catelog_id: 1,
-                  }],
-                };
-              }
-              throw new Error(`Unexpected all() SQL: ${sql}`);
-            },
-            async first() {
-              if (sql.includes('SELECT id FROM sites WHERE url IN')) {
-                duplicateParams = params;
-                return params.includes('https://example.com') && params.includes('https://example.com/')
-                  ? { id: 99 }
-                  : null;
-              }
-              throw new Error(`Unexpected first() SQL: ${sql}`);
-            },
-            async run() {
-              throw new Error(`Unexpected run() SQL: ${sql}`);
-            },
-          };
-        },
-      };
-    },
-  };
+  const kv = createKv({ session_token: '1' });
+  const data = emptyData();
+  data.pending_sites = [{
+    id: 1,
+    name: 'Example',
+    url: 'https://example.com/',
+    logo: '',
+    desc: '',
+    catelog_id: 1,
+  }];
+  // 已存在同 URL 的书签，触发重复检查返回 409
+  data.sites = [{ id: 99, url: 'https://example.com' }];
+  seedData(kv, data);
+
   const request = new Request('https://example.com/api/pending/1', {
     method: 'PUT',
     headers: {
@@ -59,8 +27,7 @@ test('PUT /api/pending/:id matches legacy root URL forms before approval', async
     },
   });
   const env = {
-    NAV_AUTH: createKv({ session_token: '1' }),
-    NAV_DB: db,
+    NAV_AUTH: kv,
   };
 
   const response = await onRequestPut({ request, env, params: { id: '1' } });
@@ -68,5 +35,4 @@ test('PUT /api/pending/:id matches legacy root URL forms before approval', async
 
   assert.equal(response.status, 409);
   assert.equal(body.code, 409);
-  assert.deepEqual(duplicateParams, ['https://example.com', 'https://example.com/']);
 });

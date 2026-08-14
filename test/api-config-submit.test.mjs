@@ -3,43 +3,21 @@ import assert from 'node:assert/strict';
 
 import { onRequestPost } from '../functions/api/config/submit.js';
 import { INPUT_LIMITS } from '../functions/lib/validators.js';
+import { createKv, seedData, emptyData, readSavedData } from './helpers/github-data-store.mjs';
 
-function createKv(initialEntries = {}) {
-  const store = new Map(Object.entries(initialEntries));
-  return {
-    async get(key) {
-      return store.get(key) ?? null;
-    },
-    async put(key, value) {
-      store.set(key, value);
-    },
-  };
+function seedPublicData(kv) {
+  seedData(kv, {
+    version: 1,
+    categories: [{ id: 1, catelog: 'Public', is_private: 0 }],
+    sites: [],
+    pending_sites: [],
+    settings: [],
+  });
 }
 
 test('public submit does not expose duplicate site URL existence', async () => {
-  const runCalls = [];
-  const firstSqlCalls = [];
-  const db = {
-    prepare(sql) {
-      return {
-        bind(...params) {
-          return {
-            async first() {
-              firstSqlCalls.push(sql);
-              if (sql.includes('SELECT catelog, is_private FROM category')) {
-                return { catelog: 'Public', is_private: 0 };
-              }
-              throw new Error(`Unexpected first() SQL: ${sql} ${JSON.stringify(params)}`);
-            },
-            async run() {
-              runCalls.push({ sql, params });
-              return { success: true };
-            },
-          };
-        },
-      };
-    },
-  };
+  const kv = createKv();
+  seedPublicData(kv);
 
   const request = new Request('https://example.com/api/config/submit', {
     method: 'POST',
@@ -57,8 +35,7 @@ test('public submit does not expose duplicate site URL existence', async () => {
 
   const env = {
     ENABLE_PUBLIC_SUBMISSION: 'true',
-    NAV_AUTH: createKv(),
-    NAV_DB: db,
+    NAV_AUTH: kv,
   };
 
   const response = await onRequestPost({ request, env });
@@ -66,30 +43,14 @@ test('public submit does not expose duplicate site URL existence', async () => {
 
   assert.equal(response.status, 201, body.message);
   assert.match(body.message, /waiting for admin approve/);
-  assert.equal(firstSqlCalls.some(sql => sql.includes('FROM sites')), false);
-  assert.equal(firstSqlCalls.some(sql => sql.includes('FROM pending_sites')), false);
-  const insertCall = runCalls.find(call => call.sql.includes('INSERT INTO pending_sites'));
-  assert.ok(insertCall);
-  assert.equal(insertCall.params[1], 'https://private.example.com');
+  const saved = readSavedData(kv);
+  assert.equal(saved.pending_sites.length, 1);
+  assert.equal(saved.pending_sites[0].url, 'https://private.example.com');
 });
 
 test('public submit rejects overlong bookmark text before writing pending site', async () => {
-  const db = {
-    prepare(sql) {
-      return {
-        bind(...params) {
-          return {
-            async first() {
-              throw new Error(`Unexpected first() SQL: ${sql} ${JSON.stringify(params)}`);
-            },
-            async run() {
-              throw new Error(`Unexpected run() SQL: ${sql} ${JSON.stringify(params)}`);
-            },
-          };
-        },
-      };
-    },
-  };
+  const kv = createKv();
+  seedData(kv, emptyData());
 
   const request = new Request('https://example.com/api/config/submit', {
     method: 'POST',
@@ -109,8 +70,7 @@ test('public submit rejects overlong bookmark text before writing pending site',
     request,
     env: {
       ENABLE_PUBLIC_SUBMISSION: 'true',
-      NAV_AUTH: createKv(),
-      NAV_DB: db,
+      NAV_AUTH: kv,
     },
   });
   const body = await response.json();
@@ -120,22 +80,9 @@ test('public submit rejects overlong bookmark text before writing pending site',
 });
 
 test('public submit requires Turnstile token when configured', async () => {
-  const db = {
-    prepare(sql) {
-      return {
-        bind(...params) {
-          return {
-            async first() {
-              throw new Error(`Unexpected first() SQL: ${sql} ${JSON.stringify(params)}`);
-            },
-            async run() {
-              throw new Error(`Unexpected run() SQL: ${sql} ${JSON.stringify(params)}`);
-            },
-          };
-        },
-      };
-    },
-  };
+  const kv = createKv();
+  seedData(kv, emptyData());
+
   const request = new Request('https://example.com/api/config/submit', {
     method: 'POST',
     headers: {
@@ -156,8 +103,7 @@ test('public submit requires Turnstile token when configured', async () => {
       ENABLE_PUBLIC_SUBMISSION: 'true',
       TURNSTILE_SITE_KEY: 'site-key',
       TURNSTILE_SECRET_KEY: 'secret-key',
-      NAV_AUTH: createKv(),
-      NAV_DB: db,
+      NAV_AUTH: kv,
     },
   });
   const body = await response.json();
@@ -168,27 +114,8 @@ test('public submit requires Turnstile token when configured', async () => {
 
 test('public submit verifies Turnstile token before inserting pending site', async () => {
   const originalFetch = globalThis.fetch;
-  const runCalls = [];
-  const db = {
-    prepare(sql) {
-      return {
-        bind(...params) {
-          return {
-            async first() {
-              if (sql.includes('SELECT catelog, is_private FROM category')) {
-                return { catelog: 'Public', is_private: 0 };
-              }
-              throw new Error(`Unexpected first() SQL: ${sql} ${JSON.stringify(params)}`);
-            },
-            async run() {
-              runCalls.push({ sql, params });
-              return { success: true };
-            },
-          };
-        },
-      };
-    },
-  };
+  const kv = createKv();
+  seedPublicData(kv);
 
   globalThis.fetch = async (url, init) => {
     assert.equal(url, 'https://challenges.cloudflare.com/turnstile/v0/siteverify');
@@ -221,14 +148,15 @@ test('public submit verifies Turnstile token before inserting pending site', asy
         ENABLE_PUBLIC_SUBMISSION: 'true',
         TURNSTILE_SITE_KEY: 'site-key',
         TURNSTILE_SECRET_KEY: 'secret-key',
-        NAV_AUTH: createKv(),
-        NAV_DB: db,
+        NAV_AUTH: kv,
       },
     });
     const body = await response.json();
 
     assert.equal(response.status, 201, body.message);
-    assert.equal(runCalls.some(call => call.sql.includes('INSERT INTO pending_sites')), true);
+    const saved = readSavedData(kv);
+    assert.equal(saved.pending_sites.length, 1);
+    assert.equal(saved.pending_sites[0].url, 'https://submitted.example.com');
   } finally {
     globalThis.fetch = originalFetch;
   }

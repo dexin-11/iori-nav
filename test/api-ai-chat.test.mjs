@@ -3,37 +3,24 @@ import assert from 'node:assert/strict';
 
 import { onRequestPost } from '../functions/api/ai-chat.js';
 import { DEFAULT_WORKERS_AI_MODEL } from '../functions/lib/workers-ai-models.js';
+import { createKv, seedData, emptyData } from './helpers/github-data-store.mjs';
 
-function createKv(initialEntries = {}) {
-  const store = new Map(Object.entries(initialEntries));
+function buildEnv(initialSettings = {}, overrides = {}) {
+  const kv = createKv({ session_token: '1' });
+  if (!initialSettings || Object.keys(initialSettings).length === 0) {
+    seedData(kv, emptyData());
+  } else {
+    seedData(kv, {
+      version: 1,
+      categories: [],
+      sites: [],
+      pending_sites: [],
+      settings: Object.entries(initialSettings).map(([key, value]) => ({ key, value })),
+    });
+  }
   return {
-    async get(key) {
-      return store.get(key) ?? null;
-    },
-  };
-}
-
-function createDb(initialSettings = {}) {
-  const store = new Map(Object.entries(initialSettings));
-  return {
-    prepare(sql) {
-      return {
-        bind(...params) {
-          return {
-            async all() {
-              if (sql.includes('SELECT key, value FROM settings WHERE key IN')) {
-                return {
-                  results: params
-                    .filter(key => store.has(key))
-                    .map(key => ({ key, value: store.get(key) })),
-                };
-              }
-              return { results: [] };
-            },
-          };
-        },
-      };
-    },
+    NAV_AUTH: kv,
+    ...overrides,
   };
 }
 
@@ -56,11 +43,7 @@ test('POST /api/ai-chat uses the saved Workers AI model first', async () => {
       messages: [{ role: 'user', content: '生成描述' }],
     }),
     env: {
-      NAV_AUTH: createKv({ session_token: '1' }),
-      NAV_DB: createDb({
-        provider: 'workers-ai',
-        model: savedModel,
-      }),
+      ...buildEnv({ provider: 'workers-ai', model: savedModel }),
       WORKERS_AI_MODEL: '@cf/meta/llama-3-8b-instruct',
       AI: {
         async run(model, payload) {
@@ -85,8 +68,7 @@ test('POST /api/ai-chat falls back to the default Workers AI model', async () =>
       messages: [{ role: 'user', content: '生成描述' }],
     }),
     env: {
-      NAV_AUTH: createKv({ session_token: '1' }),
-      NAV_DB: createDb({ provider: 'workers-ai' }),
+      ...buildEnv({ provider: 'workers-ai' }),
       AI: {
         async run(model, payload) {
           runCalls.push({ model, payload });
@@ -110,11 +92,7 @@ test('POST /api/ai-chat extracts content from Workers AI chat completion respons
       messages: [{ role: 'user', content: '生成描述' }],
     }),
     env: {
-      NAV_AUTH: createKv({ session_token: '1' }),
-      NAV_DB: createDb({
-        provider: 'workers-ai',
-        model: savedModel,
-      }),
+      ...buildEnv({ provider: 'workers-ai', model: savedModel }),
       AI: {
         async run() {
           return {
@@ -145,11 +123,7 @@ test('POST /api/ai-chat extracts a short bookmark description from verbose reaso
       messages: [{ role: 'user', content: '生成描述' }],
     }),
     env: {
-      NAV_AUTH: createKv({ session_token: '1' }),
-      NAV_DB: createDb({
-        provider: 'workers-ai',
-        model: '@cf/qwen/qwq-32b',
-      }),
+      ...buildEnv({ provider: 'workers-ai', model: '@cf/qwen/qwq-32b' }),
       AI: {
         async run() {
           return {
@@ -181,11 +155,7 @@ test('POST /api/ai-chat does not return verbose reasoning when no description ca
       messages: [{ role: 'user', content: '生成描述' }],
     }),
     env: {
-      NAV_AUTH: createKv({ session_token: '1' }),
-      NAV_DB: createDb({
-        provider: 'workers-ai',
-        model: '@cf/qwen/qwq-32b',
-      }),
+      ...buildEnv({ provider: 'workers-ai', model: '@cf/qwen/qwq-32b' }),
       AI: {
         async run() {
           return {
@@ -209,11 +179,7 @@ test('POST /api/ai-chat extracts bookmark JSON from verbose model output', async
       messages: [{ role: 'user', content: '生成名称和描述' }],
     }),
     env: {
-      NAV_AUTH: createKv({ session_token: '1' }),
-      NAV_DB: createDb({
-        provider: 'workers-ai',
-        model: '@cf/qwen/qwq-32b',
-      }),
+      ...buildEnv({ provider: 'workers-ai', model: '@cf/qwen/qwq-32b' }),
       AI: {
         async run() {
           return {

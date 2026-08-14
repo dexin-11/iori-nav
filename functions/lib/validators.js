@@ -1,4 +1,4 @@
-// Shared input bounds for D1-backed user content.
+// Shared input bounds for user-generated content.
 
 export const INPUT_LIMITS = {
   categoryName: 80,

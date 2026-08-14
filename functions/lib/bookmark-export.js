@@ -2,6 +2,7 @@
 // 书签导出数据查询：供手动导出与 WebDAV 备份共用
 
 import { normalizeUrlForStorage } from './utils';
+import { loadData } from './github-data-store';
 import {
     normalizeBookmarkDesc,
     normalizeBookmarkLogo,
@@ -115,32 +116,28 @@ export function validateBookmarkExportForImport(data) {
 
 /**
  * 查询可导出的分类与书签
- * @param {object} env - Cloudflare env（需要 NAV_DB 绑定）
+ * @param {object} env - Cloudflare env（需要 GITHUB_REPO / NAV_AUTH 绑定）
  * @param {object} options - { includePrivate: boolean }
  * @returns {Promise<{category: Array, sites: Array}>}
  */
 export async function fetchBookmarkExport(env, options = {}) {
     const includePrivate = options.includePrivate === true;
 
-    let categoryQuery = 'SELECT id, catelog, sort_order, parent_id, is_private FROM category';
-    let sitesQuery = 'SELECT id, name, url, logo, desc, catelog_id, sort_order, is_private FROM sites';
+    const data = await loadData(env);
+    let categories = (data.categories || []).slice();
+    let sites = (data.sites || []).slice();
 
     if (!includePrivate) {
         // 分类私密时导入/写入逻辑会把站点一并置为私密，因此这里按 is_private 过滤即可
-        categoryQuery += ' WHERE is_private = 0';
-        sitesQuery += ' WHERE is_private = 0';
+        categories = categories.filter(c => Number(c.is_private) === 0);
+        sites = sites.filter(s => Number(s.is_private) === 0);
     }
 
-    categoryQuery += ' ORDER BY sort_order ASC';
-    sitesQuery += ' ORDER BY sort_order ASC, create_time DESC';
-
-    const [{ results: categories }, { results: sites }] = await Promise.all([
-        env.NAV_DB.prepare(categoryQuery).all(),
-        env.NAV_DB.prepare(sitesQuery).all(),
-    ]);
+    categories.sort((a, b) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0));
+    sites.sort((a, b) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0) || String(b.create_time || '').localeCompare(String(a.create_time || '')));
 
     return {
-        category: categories || [],
-        sites: sites || [],
+        category: categories,
+        sites,
     };
 }

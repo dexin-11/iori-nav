@@ -1,5 +1,6 @@
 import { isAdminAuthenticated, errorResponse, jsonResponse } from '../_middleware';
 import { resolveWorkersAiModel } from '../lib/workers-ai-models';
+import { loadData, getSettingMap } from '../lib/github-data-store';
 
 function getMessageContentText(content) {
     if (typeof content === 'string') return content;
@@ -193,17 +194,13 @@ export async function onRequestPost(context) {
             return errorResponse('Messages array is required', 400);
         }
 
-        // 2. 从数据库读取 AI 设置
+        // 2. 从数据存储读取 AI 设置
         const keys = ['provider', 'apiKey', 'baseUrl', 'model'];
-        const { results } = await env.NAV_DB.prepare(
-            `SELECT key, value FROM settings WHERE key IN (${keys.map(() => '?').join(',')})`
-        ).bind(...keys).all();
-
+        const data = await loadData(env);
+        const map = getSettingMap(data);
         const settings = {};
-        if (results) {
-            results.forEach(row => {
-                settings[row.key] = row.value;
-            });
+        for (const key of keys) {
+          if (map[key] !== undefined) settings[key] = map[key];
         }
 
         const provider = settings.provider || 'workers-ai';

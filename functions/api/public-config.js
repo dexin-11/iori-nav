@@ -2,6 +2,7 @@
 import { jsonResponse } from '../_middleware';
 import { getSettingsKeys, parseSettings } from '../lib/settings-parser';
 import { getTurnstileConfig } from '../lib/turnstile';
+import { loadData, getSettingsRows } from '../lib/github-data-store';
 
 /**
  * @summary Get public configuration settings
@@ -18,12 +19,11 @@ export async function onRequestGet({ env }) {
   // 复用 settings-parser 模块获取布局设置
   let layoutSettings = {};
   try {
-    const keys = getSettingsKeys();
-    const placeholders = keys.map(() => '?').join(',');
-    const { results } = await env.NAV_DB.prepare(`SELECT key, value FROM settings WHERE key IN (${placeholders})`).bind(...keys).all();
-    layoutSettings = parseSettings(results);
+    const data = await loadData(env);
+    const rows = getSettingsRows(data, getSettingsKeys());
+    layoutSettings = parseSettings(rows);
   } catch (e) {
-    // 表不存在时使用默认值
+    // 数据读取失败时使用默认值
     layoutSettings = parseSettings([]);
   }
 

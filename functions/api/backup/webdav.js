@@ -2,7 +2,10 @@
 // 手动触发的书签 WebDAV 备份（仅备份分类 + 书签，含私密内容）
 
 import { isAdminAuthenticated, errorResponse, jsonResponse, checkRateLimit } from '../../_middleware';
-import { fetchBookmarkExport, validateBookmarkExportForImport } from '../../lib/bookmark-export';
+import {
+  fetchBookmarkExport,
+  validateBookmarkExportForImport,
+} from '../../lib/bookmark-export';
 import {
   uploadToWebdav,
   listWebdavFiles,
@@ -11,6 +14,7 @@ import {
   getUtf8ByteLength,
 } from '../../lib/webdav-client';
 import { IMPORT_BODY_MAX_BYTES, IMPORT_BODY_MAX_MB } from '../../lib/validators';
+import { loadData, getSettingMap } from '../../lib/github-data-store';
 
 const WEBDAV_KEYS = ['webdav_url', 'webdav_username', 'webdav_password', 'webdav_dir'];
 
@@ -78,15 +82,12 @@ function validateRestorableBackup(data, byteLength) {
 }
 
 async function loadWebdavConfig(env) {
-  const placeholders = WEBDAV_KEYS.map(() => '?').join(',');
-  const { results } = await env.NAV_DB
-    .prepare(`SELECT key, value FROM settings WHERE key IN (${placeholders})`)
-    .bind(...WEBDAV_KEYS)
-    .all();
+  const data = await loadData(env);
+  const map = getSettingMap(data);
 
   const config = {};
-  (results || []).forEach(row => {
-    config[row.key] = row.value;
+  WEBDAV_KEYS.forEach(key => {
+    if (map[key] !== undefined) config[key] = map[key];
   });
   return config;
 }

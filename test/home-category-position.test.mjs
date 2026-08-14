@@ -4,41 +4,24 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { onRequest } from '../functions/index.js';
+import { createKv, seedData } from './helpers/github-data-store.mjs';
 
 const templateHtml = readFileSync(resolve('public/index.html'), 'utf8');
 
-function createStatement(sql, settingsRows) {
-  return {
-    bind() {
-      return createStatement(sql, settingsRows);
-    },
-    async all() {
-      if (sql.includes('FROM category')) {
-        return {
-          results: [
-            { id: 1, catelog: '工具', sort_order: 1, parent_id: 0 },
-          ],
-        };
-      }
-
-      if (sql.includes('FROM settings')) {
-        return { results: settingsRows };
-      }
-
-      if (sql.includes('FROM sites')) {
-        return {
-          results: [
-            { id: 1, name: 'Example', url: 'https://example.com', logo: '', desc: 'Example site', catelog_id: 1, catelog_name: '工具' },
-          ],
-        };
-      }
-
-      return { results: [] };
-    },
-  };
-}
-
 async function renderHome(settingsRows = [], envOverrides = {}, requestUrl = 'https://example.com/?render-test=1') {
+  const kv = createKv();
+  seedData(kv, {
+    version: 1,
+    categories: [
+      { id: 1, catelog: '工具', sort_order: 1, parent_id: 0, is_private: 0 },
+    ],
+    sites: [
+      { id: 1, name: 'Example', url: 'https://example.com', logo: '', desc: 'Example site', catelog_id: 1, catelog_name: '工具', is_private: 0 },
+    ],
+    pending_sites: [],
+    settings: settingsRows,
+  });
+
   const response = await onRequest({
     request: new Request(requestUrl),
     env: {
@@ -47,18 +30,7 @@ async function renderHome(settingsRows = [], envOverrides = {}, requestUrl = 'ht
           return new Response(templateHtml);
         },
       },
-      NAV_AUTH: {
-        async get() {
-          return null;
-        },
-        async put() {},
-        async delete() {},
-      },
-      NAV_DB: {
-        prepare(sql) {
-          return createStatement(sql, settingsRows);
-        },
-      },
+      NAV_AUTH: kv,
       SITE_NAME: 'Unit Site',
       SITE_DESCRIPTION: 'Unit Description',
       FOOTER_TEXT: 'Unit Footer',

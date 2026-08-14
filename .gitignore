@@ -13,6 +13,7 @@ wrangler.toml
 .vscode/
 .idea/
 .trae/
+.trae-html-share-packages/
 .gemini/
 .cursor/
 .codex/

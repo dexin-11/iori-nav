@@ -1,31 +1,22 @@
 // functions/api/categories/[id].js
 import { isAdminAuthenticated, errorResponse, jsonResponse, normalizeSortOrder, markHomeCacheDirty } from '../../_middleware';
 import { normalizeCategoryName } from '../../lib/validators';
+import { readFromGithub, saveData, nowSql } from '../../lib/github-data-store';
 
-function buildPrivateDescendantStatements(env, categoryId) {
-  const descendantsCte = `
-    WITH RECURSIVE descendants(id) AS (
-      SELECT id FROM category WHERE id = ?
-      UNION ALL
-      SELECT c.id FROM category c
-      INNER JOIN descendants d ON c.parent_id = d.id
-    )
-  `;
-
-  return [
-    env.NAV_DB.prepare(`
-      ${descendantsCte}
-      UPDATE category
-      SET is_private = 1
-      WHERE id IN (SELECT id FROM descendants)
-    `).bind(categoryId),
-    env.NAV_DB.prepare(`
-      ${descendantsCte}
-      UPDATE sites
-      SET is_private = 1
-      WHERE catelog_id IN (SELECT id FROM descendants)
-    `).bind(categoryId),
-  ];
+/**
+ * 返回 categoryId 及其全部后代分类的 id 集合
+ */
+function getDescendantIds(categories, rootId) {
+  const result = [];
+  const stack = [String(rootId)];
+  while (stack.length > 0) {
+    const id = stack.pop();
+    result.push(id);
+    for (const c of categories) {
+      if (String(c.parent_id) === String(id)) stack.push(String(c.id));
+    }
+  }
+  return result;
 }
 
 export async function onRequestPut(context) {
@@ -43,29 +34,24 @@ export async function onRequestPut(context) {
       return errorResponse('Category id is required', 400);
     }
 
+    const { data, sha } = await readFromGithub(env);
+    const categories = data.categories || [];
+
     if (body && body.reset) {
       // 1. Check for sub-categories
-      const hasChildren = await env.NAV_DB.prepare('SELECT id FROM category WHERE parent_id = ? LIMIT 1')
-        .bind(categoryId)
-        .first();
-        
+      const hasChildren = categories.some(c => String(c.parent_id) === String(categoryId));
       if (hasChildren) {
         return errorResponse('无法删除：该分类包含子分类，请先删除或移动子分类', 400);
       }
 
       // 2. Check for associated sites (bookmarks)
-      const hasSites = await env.NAV_DB.prepare('SELECT id FROM sites WHERE catelog_id = ? LIMIT 1')
-        .bind(categoryId)
-        .first();
-        
+      const hasSites = (data.sites || []).some(s => String(s.catelog_id) === String(categoryId));
       if (hasSites) {
         return errorResponse('无法删除：该分类包含书签，请先删除或移动书签', 400);
       }
 
-      await env.NAV_DB.prepare('DELETE FROM category WHERE id = ?')
-        .bind(categoryId)
-        .run();
-
+      data.categories = categories.filter(c => String(c.id) !== String(categoryId));
+      await saveData(env, data, sha);
       await markHomeCacheDirty(env, 'all');
       
       return jsonResponse({
@@ -92,7 +78,7 @@ export async function onRequestPut(context) {
     // 检查 parent_id 存在性及循环引用
     let parentCategory = null;
     if (parentId !== 0) {
-      parentCategory = await env.NAV_DB.prepare('SELECT id, is_private FROM category WHERE id = ?').bind(parentId).first();
+      parentCategory = categories.find(c => String(c.id) === String(parentId));
       if (!parentCategory) {
         return errorResponse('父分类不存在', 400);
       }
@@ -105,16 +91,16 @@ export async function onRequestPut(context) {
           return errorResponse('不允许创建循环引用的分类层级', 400);
         }
         visited.add(currentParent);
-        const row = await env.NAV_DB.prepare('SELECT parent_id FROM category WHERE id = ?').bind(currentParent).first();
+        const row = categories.find(c => String(c.id) === String(currentParent));
         if (!row) break;
-        currentParent = row.parent_id || 0;
+        currentParent = Number(row.parent_id) || 0;
       }
     }
 
     // 检查在同一个父分类下，分类名称是否已存在（排除自身）
-    const existingCategory = await env.NAV_DB.prepare('SELECT id FROM category WHERE catelog = ? AND parent_id = ? AND id != ?')
-      .bind(catelog, parentId, categoryId)
-      .first();
+    const existingCategory = categories.find(
+      c => c.catelog === catelog && String(c.parent_id) === String(parentId) && String(c.id) !== String(categoryId)
+    );
 
     if (existingCategory) {
       return errorResponse('该分类名称在当前父分类下已存在', 409);
@@ -123,20 +109,29 @@ export async function onRequestPut(context) {
     sort_order = normalizeSortOrder(sort_order);
     const isPrivate = parentCategory?.is_private === 1 ? 1 : (body.is_private ? 1 : 0);
 
-    const batchStmts = [
-      env.NAV_DB.prepare('UPDATE category SET catelog = ?, sort_order = ?, parent_id = ?, is_private = ? WHERE id = ?')
-        .bind(catelog, sort_order, parentId, isPrivate, categoryId),
-      env.NAV_DB.prepare('UPDATE sites SET catelog_name = ? WHERE catelog_id = ?')
-        .bind(catelog, categoryId),
-    ];
+    const category = categories.find(c => String(c.id) === String(categoryId));
+    if (!category) {
+      return errorResponse('分类不存在', 404);
+    }
+    category.catelog = catelog;
+    category.sort_order = sort_order;
+    category.parent_id = parentId;
+    category.is_private = isPrivate;
+    category.update_time = nowSql();
+
+    // 同步更新该分类下所有书签的 catelog_name
+    (data.sites || []).forEach(s => {
+      if (String(s.catelog_id) === String(categoryId)) s.catelog_name = catelog;
+    });
 
     // A private category makes the whole subtree private so public navigation cannot expose descendants.
     if (isPrivate === 1) {
-      batchStmts.push(...buildPrivateDescendantStatements(env, categoryId));
+      const ids = new Set(getDescendantIds(categories, categoryId));
+      categories.forEach(c => { if (ids.has(String(c.id))) c.is_private = 1; });
+      (data.sites || []).forEach(s => { if (ids.has(String(s.catelog_id))) s.is_private = 1; });
     }
 
-    await env.NAV_DB.batch(batchStmts);
-
+    await saveData(env, data, sha);
     await markHomeCacheDirty(env, 'all');
 
     return jsonResponse({

@@ -2,6 +2,7 @@
 import { isAdminAuthenticated, errorResponse, jsonResponse, markHomeCacheDirty, normalizeSortOrder } from '../../_middleware';
 import { buildFaviconUrl, getUrlMatchCandidates, normalizeUrlForStorage } from '../../lib/utils';
 import { normalizeBookmarkDesc, normalizeBookmarkLogo, normalizeBookmarkName, normalizeBookmarkUrl } from '../../lib/validators';
+import { readFromGithub, saveData, nextId, nowSql } from '../../lib/github-data-store';
 
 export async function onRequestPut(context) {
   const { request, env, params } = context;
@@ -12,13 +13,14 @@ export async function onRequestPut(context) {
   }
 
   try {
-    const { results } = await env.NAV_DB.prepare('SELECT * FROM pending_sites WHERE id = ?').bind(id).all();
-    
-    if (results.length === 0) {
+    const { data, sha } = await readFromGithub(env);
+    const pending = (data.pending_sites || []).find(p => String(p.id) === String(id));
+
+    if (!pending) {
       return errorResponse('Pending config not found', 404);
     }
 
-    const config = results[0];
+    const config = pending;
     let updateData = {};
     const contentType = request.headers.get('Content-Type') || '';
     if (contentType.includes('application/json')) {
@@ -66,28 +68,37 @@ export async function onRequestPut(context) {
     }
 
     const urlCandidates = getUrlMatchCandidates(rawUrl);
-    const placeholders = urlCandidates.map(() => '?').join(',');
-    const duplicate = await env.NAV_DB.prepare(`SELECT id FROM sites WHERE url IN (${placeholders})`)
-      .bind(...urlCandidates)
-      .first();
+    const duplicate = (data.sites || []).find(s => urlCandidates.includes(s.url));
     if (duplicate) {
       return errorResponse('该 URL 已存在，请勿重复添加', 409);
     }
 
     const iconAPI = env.ICON_API || 'https://faviconsnap.com/api/favicon?url=';
     sanitizedLogo = buildFaviconUrl(sanitizedUrl, sanitizedLogo, iconAPI);
-    const category = await env.NAV_DB.prepare('SELECT catelog, is_private FROM category WHERE id = ?').bind(catelogId).first();
+    const category = (data.categories || []).find(c => String(c.id) === String(catelogId));
     if (!category) {
       return errorResponse('Category not found.', 400);
     }
-    const finalIsPrivate = category.is_private === 1 ? 1 : isPrivateValue;
+    const finalIsPrivate = Number(category.is_private) === 1 ? 1 : isPrivateValue;
 
-    await env.NAV_DB.prepare(`
-      INSERT INTO sites (name, url, logo, desc, catelog_id, catelog_name, sort_order, is_private)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).bind(sanitizedName, sanitizedUrl, sanitizedLogo, sanitizedDesc, catelogId, category.catelog, sortOrderValue, finalIsPrivate).run();
-    
-    await env.NAV_DB.prepare('DELETE FROM pending_sites WHERE id = ?').bind(id).run();
+    const now = nowSql();
+    (data.sites = data.sites || []).push({
+      id: nextId(data.sites),
+      name: sanitizedName,
+      url: sanitizedUrl,
+      logo: sanitizedLogo,
+      desc: sanitizedDesc,
+      catelog_id: category.id,
+      catelog_name: category.catelog,
+      sort_order: sortOrderValue,
+      is_private: finalIsPrivate,
+      create_time: now,
+      update_time: now,
+    });
+
+    data.pending_sites = (data.pending_sites || []).filter(p => String(p.id) !== String(id));
+
+    await saveData(env, data, sha);
 
     await markHomeCacheDirty(env, finalIsPrivate ? 'private' : 'all');
 
@@ -110,8 +121,10 @@ export async function onRequestDelete(context) {
   }
 
   try {
-    await env.NAV_DB.prepare('DELETE FROM pending_sites WHERE id = ?').bind(id).run();
-    
+    const { data, sha } = await readFromGithub(env);
+    data.pending_sites = (data.pending_sites || []).filter(p => String(p.id) !== String(id));
+    await saveData(env, data, sha);
+
     return jsonResponse({
       code: 200,
       message: 'Pending config rejected successfully',
