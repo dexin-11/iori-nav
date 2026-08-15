@@ -159,9 +159,12 @@
         ? 'bg-accent-100 text-accent-700 hover:bg-accent-200'
         : 'bg-gray-200 text-gray-400 cursor-not-allowed';
       const categoryHtml = hideCardCategory ? '' : `
-                <span class="preview-category site-category inline-flex items-center px-2 py-0.5 mt-1 rounded-full text-xs font-medium bg-secondary-100 text-primary-700">
+                <div class="site-tags flex flex-wrap gap-1 mt-1">
+                <span class="preview-category site-category inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-secondary-100 text-primary-700">
                   ${shared.escapeHTML(card.category)}
-                </span>`;
+                </span>
+                ${card.isOverseas ? `<span class="site-tag-overseas inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700">墙外</span>` : ''}
+                </div>`;
       const descHtml = hideCardDesc ? '' : `<p class="preview-desc mt-2 text-sm text-gray-600 leading-relaxed line-clamp-2" title="${shared.escapeHTML(card.desc)}">${shared.escapeHTML(card.desc)}</p>`;
       const linkHtml = hideCardLinks ? '' : `
           <div class="preview-links mt-3 flex items-center justify-between">

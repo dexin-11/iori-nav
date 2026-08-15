@@ -41,7 +41,7 @@ export async function onRequestPut(context) {
     }
 
     const config = await request.json();
-    const { name, url, logo, desc, catelog_id, sort_order, is_private } = config;
+    const { name, url, logo, desc, catelog_id, sort_order, is_private, is_overseas } = config;
 
     const nameResult = normalizeBookmarkName(name);
     if (!nameResult.ok) return errorResponse(nameResult.message, 400);
@@ -62,6 +62,7 @@ export async function onRequestPut(context) {
     const sanitizedDesc = descResult.value;
     const sortOrderValue = normalizeSortOrder(sort_order);
     const isPrivateValue = is_private ? 1 : 0;
+    const isOverseasValue = is_overseas ? 1 : 0;
 
     if (!catelog_id) {
       return errorResponse('Catelog is required', 400);
@@ -100,6 +101,7 @@ export async function onRequestPut(context) {
     existing.catelog_name = catelogName;
     existing.sort_order = sortOrderValue;
     existing.is_private = finalIsPrivate;
+    existing.is_overseas = isOverseasValue;
     existing.update_time = nowSql();
 
     await saveData(env, data, sha);

@@ -29,10 +29,11 @@ export function renderSiteCards(sites, settings) {
         </button>
       </div>`;
 
-    const categoryHtml = config.hideCategory ? '' : `
-      <span class="${config.categoryClass}">
-        ${card.catalogHtml}
-      </span>`;
+    const tagsHtml = config.hideCategory ? '' : `
+      <div class="${config.tagContainerClass}">
+        <span class="${config.categoryClass}">${card.catalogHtml}</span>
+        ${card.isOverseas ? `<span class="${config.overseasTagClass}">墙外</span>` : ''}
+      </div>`;
 
     return `
       <div class="${config.baseCardClass} ${config.frostedClass} ${config.cardStyleClass} card-anim-enter" data-id="${card.id}">
@@ -47,7 +48,7 @@ export function renderSiteCards(sites, settings) {
               </div>
               <div class="flex-1 min-w-0">
                 <h3 class="${config.titleClass}" title="${card.nameHtml}">${card.nameHtml}</h3>
-                ${categoryHtml}
+                ${tagsHtml}
               </div>
             </div>
             ${descHtml}

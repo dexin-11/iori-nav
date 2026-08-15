@@ -19,7 +19,9 @@
       cardStyleClass: '',
       titleClass: 'site-title text-base font-medium text-gray-900 dark:text-gray-100 truncate transition-all duration-300 origin-left',
       descClass: 'mt-2 text-sm text-gray-600 dark:text-gray-400 leading-relaxed line-clamp-2',
-      categoryClass: 'site-category inline-flex items-center px-2 py-0.5 mt-1 rounded-full text-xs font-medium bg-secondary-100 text-primary-700 dark:bg-secondary-800 dark:text-primary-300',
+      categoryClass: 'site-category inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-secondary-100 text-primary-700 dark:bg-secondary-800 dark:text-primary-300',
+      tagContainerClass: 'site-tags flex flex-wrap gap-1 mt-1',
+      overseasTagClass: 'site-tag-overseas inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-300',
       linkRowClass: 'mt-3 flex items-center justify-between',
       urlTextClass: 'text-xs text-primary-600 dark:text-primary-400 truncate flex-1 min-w-0 mr-2',
       copyButtonBaseClass: 'copy-btn relative flex items-center px-2 py-1 rounded-full text-xs font-medium transition-colors',
@@ -265,10 +267,11 @@
             </button>
           </div>`;
 
-        const categoryHtml = cardConfig.hideCategory ? '' : `
-                <span class="${cardConfig.categoryClass}">
-                  ${site.catalogHtml}
-                </span>`;
+        const tagsHtml = cardConfig.hideCategory ? '' : `
+                <div class="${cardConfig.tagContainerClass}">
+                  <span class="${cardConfig.categoryClass}">${site.catalogHtml}</span>
+                  ${site.isOverseas ? `<span class="${cardConfig.overseasTagClass}">墙外</span>` : ''}
+                </div>`;
 
         const card = document.createElement('div');
         card.className = `${cardConfig.baseCardClass} ${cardConfig.frostedClass} ${cardConfig.cardStyleClass} card-anim-enter`;
@@ -286,7 +289,7 @@
               </div>
               <div class="flex-1 min-w-0">
                 <h3 class="${cardConfig.titleClass}" title="${site.nameHtml}">${site.nameHtml}</h3>
-                ${categoryHtml}
+                ${tagsHtml}
               </div>
             </div>
             ${descHtml}

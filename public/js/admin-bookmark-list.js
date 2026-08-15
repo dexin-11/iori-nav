@@ -170,9 +170,12 @@
                 <h3 class="site-title truncate" title="${safeName}">${safeName}</h3>
                 ${privateIcon}
               </div>
-              <span class="inline-flex items-center px-2 py-0.5 mt-1.5 rounded-md text-xs font-medium bg-gray-100 text-gray-600">
-                ${safeCatalog}
-              </span>
+              <div class="flex flex-wrap gap-1 mt-1.5">
+                <span class="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-gray-100 text-gray-600">
+                  ${safeCatalog}
+                </span>
+                ${Number(config.is_overseas) === 1 ? '<span class="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-red-100 text-red-700">墙外</span>' : ''}
+              </div>
             </div>
           </div>
           <p class="mt-3 text-sm text-gray-500 leading-relaxed line-clamp-2 h-10" title="${descCell}">${descCell}</p>
@@ -235,6 +238,7 @@
     document.getElementById('editBookmarkDesc').value = config.desc;
     document.getElementById('editBookmarkSortOrder').value = config.sort_order;
     document.getElementById('editBookmarkIsPrivate').checked = !!config.is_private;
+    document.getElementById('editBookmarkIsOverseas').checked = !!config.is_overseas;
     window.createCascadingDropdown('editBookmarkCatelogWrapper', 'editBookmarkCatelog', window.categoriesTree, config.catelog_id);
 
     const editModal = document.getElementById('editBookmarkModal');

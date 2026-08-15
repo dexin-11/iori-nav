@@ -62,7 +62,7 @@ export async function onRequestPost(context) {
 
   try {
     const config = await request.json();
-    const { name, url, logo, desc, catelogId, sort_order, is_private } = config;
+    const { name, url, logo, desc, catelogId, sort_order, is_private, is_overseas } = config;
     const iconAPI = env.ICON_API || 'https://faviconsnap.com/api/favicon?url=';
 
     const nameResult = normalizeBookmarkName(name);
@@ -84,6 +84,7 @@ export async function onRequestPost(context) {
     const sanitizedDesc = descResult.value;
     const sortOrderValue = normalizeSortOrder(sort_order);
     const isPrivateValue = is_private ? 1 : 0;
+    const isOverseasValue = is_overseas ? 1 : 0;
 
     if (!catelogId) {
       return errorResponse('Catelog is required', 400);
@@ -127,6 +128,7 @@ export async function onRequestPost(context) {
       catelog_name: category.catelog,
       sort_order: sortOrderValue,
       is_private: finalIsPrivate,
+      is_overseas: isOverseasValue,
       create_time: now,
       update_time: now,
     });

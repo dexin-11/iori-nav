@@ -271,17 +271,23 @@ input[list]:hover::-webkit-calendar-picker-indicator {
 }
 
 .site-card .site-category {
-    min-width: 0;
     max-width: 100%;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    word-break: break-word;
+}
+
+/* 标签容器内各标签不额外加边距，统一由容器 gap 控制 */
+.home-live-preview .site-card .site-tags .inline-flex,
+.home-live-preview .site-card .site-tags .site-category {
+    margin: 0 !important;
 }
 
 .home-live-preview[data-device="mobile"] .site-card.style-2 .site-category,
 .site-card.style-2 .preview-category {
     display: inline-block;
-    max-width: min(100%, 5rem);
+    max-width: 100%;
     vertical-align: middle;
 }
 

@@ -71,7 +71,9 @@ export function buildCardTemplateConfig(settings = {}, device = 'desktop') {
     cardStyleClass: cardStyle === 'style2' ? 'style-2' : (isNavigationTileStyle ? 'style-3' : ''),
     titleClass: 'site-title text-base font-medium text-gray-900 dark:text-gray-100 truncate transition-all duration-300 origin-left',
     descClass: 'mt-2 text-sm text-gray-600 dark:text-gray-400 leading-relaxed line-clamp-2',
-    categoryClass: 'site-category inline-flex items-center px-2 py-0.5 mt-1 rounded-full text-xs font-medium bg-secondary-100 text-primary-700 dark:bg-secondary-800 dark:text-primary-300',
+    categoryClass: 'site-category inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-secondary-100 text-primary-700 dark:bg-secondary-800 dark:text-primary-300',
+    tagContainerClass: 'site-tags flex flex-wrap gap-1 mt-1',
+    overseasTagClass: 'site-tag-overseas inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-300',
     linkRowClass: 'mt-3 flex items-center justify-between',
     urlTextClass: 'text-xs text-primary-600 dark:text-primary-400 truncate flex-1 min-w-0 mr-2',
     copyButtonBaseClass: 'copy-btn relative flex items-center px-2 py-1 rounded-full text-xs font-medium transition-colors',
@@ -100,6 +102,7 @@ export function buildCardViewModel(site) {
     logoUrlHtml: escapeHTML(normalizedLogo),
     cardInitialHtml: escapeHTML((rawName.trim().charAt(0) || '站').toUpperCase()),
     hasValidUrl: Boolean(normalizedUrl),
+    isOverseas: Number(site?.is_overseas) === 1,
     searchText: buildSearchText(site, normalizedUrl),
   };
 }

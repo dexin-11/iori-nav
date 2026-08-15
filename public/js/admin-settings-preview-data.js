@@ -37,6 +37,7 @@
       desc: String(item?.desc || '暂无描述').trim(),
       category,
       hasValidUrl: Boolean(url),
+      isOverseas: Number(item?.is_overseas) === 1,
       sortOrder: Number(item?.sort_order ?? 9999),
       createdAt: Date.parse(item?.create_time || '') || 0,
     };
