@@ -321,9 +321,10 @@
 
     if (categoryNav) {
       categoryNav.style.display = (isHorizontal && !isMobilePreview) ? 'flex' : 'none';
-      categoryNav.classList.toggle('single-line', settings.categoryFlow === 'single_line');
-      categoryNav.classList.toggle('multi-line', settings.categoryFlow === 'multi_line');
-      nav.renderCategoryNav(categoryNav, categoryTree, activeCategory, true, { flow: settings.categoryFlow });
+      // 分类标签始终换行展示，不再折叠进「更多」
+      categoryNav.classList.toggle('single-line', false);
+      categoryNav.classList.toggle('multi-line', true);
+      nav.renderCategoryNav(categoryNav, categoryTree, activeCategory, true, { flow: 'multi_line' });
     }
     nav.renderCategoryNav(sidebarCategories, categoryTree, activeCategory, true, { variant: 'sidebar' });
     updateHeroOrder(root, settings);

@@ -61,9 +61,10 @@ test('home category navigation defaults below the search box', async () => {
   assert.ok(searchIndex > -1);
   assert.ok(navIndex > -1);
   assert.ok(searchIndex < navIndex);
-  assert.equal(html.includes('justify-center'), true);
+  // 分类标签默认换行展示，不折叠进「更多」
+  assert.equal(html.includes('justify-start'), true);
   assert.equal(html.includes('horizontal-category-nav-shell is-top'), false);
-  assert.equal(html.includes('id="horizontalMoreWrapper"'), true);
+  assert.equal(html.includes('id="horizontalMoreWrapper"'), false);
 });
 
 test('home category links use IDs and SSR accepts category ID query', async () => {

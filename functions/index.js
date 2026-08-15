@@ -278,7 +278,8 @@ export async function onRequest(context) {
   };
   const categoryPosition = normalizeCategoryPosition(S.home_category_position, S.layout_menu_layout);
   const isHorizontalCategoryLayout = categoryPosition !== 'left';
-  const categoryFlow = S.home_category_flow === 'multi_line' ? 'multi_line' : 'single_line';
+  // 分类标签始终换行展示，不再折叠进「更多」（原单行折叠行为已移除）
+  const categoryFlow = 'multi_line';
   // 分类行宽度 max-w-5xl（64rem），按钮 min-width: 4em+2rem，单行约 8 个
   const horizontalCategoryNavShellClass = categoryPosition === 'top'
     ? 'horizontal-category-nav-shell is-top relative mx-auto'
