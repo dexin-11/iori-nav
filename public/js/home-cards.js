@@ -57,7 +57,27 @@
     function getSitesForCatalog(catalogId) {
       const allSites = window.IORI_SITES || [];
       if (!catalogId) return allSites;
-      return allSites.filter(site => String(site.catelog_id) === String(catalogId));
+      const ids = collectCatalogIdsWithDescendants(catalogId);
+      return allSites.filter(site => ids.has(String(site.catelog_id)));
+    }
+
+    // 收集分类及其全部子分类 id：点击父分类时展示该目录下全部标签（含子分类）的网站
+    function collectCatalogIdsWithDescendants(catalogId) {
+      const ids = new Set([String(catalogId)]);
+      const cats = window.IORI_CATEGORIES || [];
+      let added = true;
+      while (added) {
+        added = false;
+        for (const c of cats) {
+          const parent = c.parent_id == null ? null : String(c.parent_id);
+          const id = String(c.id);
+          if (parent !== null && ids.has(parent) && !ids.has(id)) {
+            ids.add(id);
+            added = true;
+          }
+        }
+      }
+      return ids;
     }
 
     function applyCardGridColumns() {

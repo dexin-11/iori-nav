@@ -182,10 +182,23 @@ export async function onRequest(context) {
   let currentCatalogName = '';
   const catalogExists = requestedCatalogId !== null;
 
+  // 收集分类及其全部子分类 id：点击父分类时展示该目录下全部标签（含子分类）的网站
+  const collectCategoryWithDescendants = (categoryId) => {
+    const ids = [];
+    const walk = (id) => {
+      const cat = categoryMap.get(id);
+      if (!cat) return;
+      ids.push(id);
+      (cat.children || []).forEach(child => walk(child.id));
+    };
+    walk(categoryId);
+    return ids;
+  };
+
   if (catalogExists) {
     const requestedCategory = categoryMap.get(requestedCatalogId);
     currentCatalogName = requestedCategory.catelog;
-    targetCategoryIds.push(requestedCatalogId);
+    targetCategoryIds = collectCategoryWithDescendants(requestedCatalogId);
   }
 
   const sites = targetCategoryIds.length > 0
@@ -488,6 +501,10 @@ export async function onRequest(context) {
   const safeSitesJson = JSON.stringify(cardHydrationState.cards).replace(/</g, '\\u003c');
   const safeCardConfigJson = JSON.stringify(cardHydrationState.config).replace(/</g, '\\u003c');
   const safeCardConfigsJson = JSON.stringify(cardHydrationState.configs).replace(/</g, '\\u003c');
+  // 分类层级（id/parent_id），供前端点击分类时按「含子分类」过滤网站
+  const safeCategoriesJson = JSON.stringify(
+    categories.map(c => ({ id: c.id, parent_id: c.parent_id == null ? null : c.parent_id }))
+  ).replace(/</g, '\\u003c');
   const safeLayoutConfigJson = JSON.stringify({
     hideDesc: S.layout_hide_desc,
     hideLinks: S.layout_hide_links,
@@ -525,7 +542,7 @@ export async function onRequest(context) {
   } else {
     html = html.replace(
       mainJsMarker,
-      () => `<script>window.IORI_SITES=${safeSitesJson};window.IORI_CARD_CONFIG=${safeCardConfigJson};window.IORI_CARD_CONFIGS=${safeCardConfigsJson};window.IORI_LAYOUT_CONFIG=${safeLayoutConfigJson};</script>\n  ${mainJsMarker}`
+      () => `<script>window.IORI_SITES=${safeSitesJson};window.IORI_CATEGORIES=${safeCategoriesJson};window.IORI_CARD_CONFIG=${safeCardConfigJson};window.IORI_CARD_CONFIGS=${safeCardConfigsJson};window.IORI_LAYOUT_CONFIG=${safeLayoutConfigJson};</script>\n  ${mainJsMarker}`
     );
   }
 
